@@ -91,6 +91,11 @@ class FreeSpaceManager:
         """
         Allocate the requested number of blocks.
 
+        When *contiguous* is True the active strategy (first_fit,
+        best_fit or worst_fit) is used to locate a suitable run of
+        consecutive free blocks.  When False, ``_scattered_fit`` is
+        called instead, collecting any available free blocks.
+
         Args:
             num_blocks (int): How many blocks to allocate (must be > 0).
             contiguous (bool): If True, all allocated blocks will be
@@ -108,9 +113,17 @@ class FreeSpaceManager:
                 f"num_blocks must be positive, got {num_blocks}"
             )
 
-        if contiguous:
-            return self._allocate_contiguous(num_blocks)
-        return self._allocate_scattered(num_blocks)
+        if not contiguous:
+            return self._scattered_fit(num_blocks)
+
+        # Dispatch to the strategy-specific contiguous allocator
+        strategy_map = {
+            "first_fit": self._first_fit_contiguous,
+            "best_fit":  self._best_fit_contiguous,
+            "worst_fit": self._worst_fit_contiguous,
+        }
+        allocator = strategy_map[self.allocation_strategy]
+        return allocator(num_blocks)
 
     def deallocate_blocks(self, block_list: List[int]) -> bool:
         """
@@ -220,20 +233,15 @@ class FreeSpaceManager:
         return (transitions / self.total_blocks) * 100.0
 
     # ------------------------------------------------------------------ #
-    #  Contiguous space search
+    #  Contiguous space search (delegates to active strategy)
     # ------------------------------------------------------------------ #
 
     def find_contiguous_space(self, num_blocks: int) -> Optional[int]:
         """
         Find a starting block index for *num_blocks* contiguous free blocks.
 
-        The search strategy is determined by ``self.allocation_strategy``:
-
-        - **first_fit** — returns the start of the first hole that is
-          large enough.
-        - **best_fit** — returns the start of the smallest hole that
-          fits the request.
-        - **worst_fit** — returns the start of the largest free hole.
+        Delegates to the active allocation strategy. This is a **search-only**
+        method — the bitmap is *not* modified.
 
         Args:
             num_blocks (int): Number of consecutive free blocks needed.
@@ -245,8 +253,7 @@ class FreeSpaceManager:
         if num_blocks <= 0 or num_blocks > self.total_blocks:
             return None
 
-        # Collect every free hole as (start, length)
-        holes = self._find_free_holes()
+        holes = self.get_all_free_regions()
 
         if self.allocation_strategy == "first_fit":
             for start, length in holes:
@@ -271,6 +278,60 @@ class FreeSpaceManager:
             return worst[0] if worst else None
 
     # ------------------------------------------------------------------ #
+    #  Strategy management
+    # ------------------------------------------------------------------ #
+
+    def set_allocation_strategy(self, strategy: str) -> bool:
+        """
+        Change the allocation strategy at runtime.
+
+        Args:
+            strategy (str): One of 'first_fit', 'best_fit', or 'worst_fit'.
+
+        Returns:
+            bool: True if the strategy was set successfully,
+                False if the value is invalid.
+        """
+        if strategy not in _VALID_STRATEGIES:
+            logger.warning(
+                "set_allocation_strategy: invalid strategy '%s'. "
+                "Choose from %s", strategy, _VALID_STRATEGIES,
+            )
+            return False
+
+        self.allocation_strategy = strategy
+        logger.info("Allocation strategy changed to '%s'", strategy)
+        return True
+
+    # ------------------------------------------------------------------ #
+    #  Free-region analysis
+    # ------------------------------------------------------------------ #
+
+    def get_all_free_regions(self) -> List[tuple]:
+        """
+        Return every contiguous run of free blocks on the disk.
+
+        Useful for analysis, visualisation, and strategy selection.
+
+        Returns:
+            list[tuple[int, int]]: Each element is
+                ``(start_block, length)`` where *start_block* is the
+                first free block in the run and *length* is the number
+                of consecutive free blocks.
+        """
+        regions: List[tuple] = []
+        i = 0
+        while i < self.total_blocks:
+            if self.bitmap[i] == 0:
+                start = i
+                while i < self.total_blocks and self.bitmap[i] == 0:
+                    i += 1
+                regions.append((start, i - start))
+            else:
+                i += 1
+        return regions
+
+    # ------------------------------------------------------------------ #
     #  Allocation map / statistics
     # ------------------------------------------------------------------ #
 
@@ -287,8 +348,8 @@ class FreeSpaceManager:
                 - largest_contiguous_space (int)
         """
         # Find the largest contiguous free hole
-        holes = self._find_free_holes()
-        largest = max((length for _, length in holes), default=0)
+        regions = self.get_all_free_regions()
+        largest = max((length for _, length in regions), default=0)
 
         return {
             "total_blocks": self.total_blocks,
@@ -299,60 +360,138 @@ class FreeSpaceManager:
         }
 
     # ------------------------------------------------------------------ #
-    #  Internal helpers
+    #  Strategy implementations (contiguous)
     # ------------------------------------------------------------------ #
 
-    def _find_free_holes(self) -> List[tuple]:
+    def _first_fit_contiguous(self, num_blocks: int) -> Optional[List[int]]:
         """
-        Scan the bitmap and return every contiguous run of free blocks.
+        First-fit contiguous allocation.
+
+        Scans the bitmap from block 0 and returns the first contiguous
+        free region that is large enough to satisfy the request.
+        This is the fastest strategy but can cause fragmentation at
+        the start of the disk over time.
+
+        Args:
+            num_blocks (int): Number of contiguous blocks to allocate.
 
         Returns:
-            list[tuple[int, int]]: Each element is (start_index, length).
+            list[int] | None: Allocated block numbers, or None.
         """
-        holes: List[tuple] = []
-        i = 0
-        while i < self.total_blocks:
-            if self.bitmap[i] == 0:
-                start = i
-                while i < self.total_blocks and self.bitmap[i] == 0:
-                    i += 1
-                holes.append((start, i - start))
-            else:
-                i += 1
-        return holes
+        regions = self.get_all_free_regions()
+        for start, length in regions:
+            if length >= num_blocks:
+                block_list = list(range(start, start + num_blocks))
+                for b in block_list:
+                    self.bitmap[b] = 1
+                logger.debug(
+                    "first_fit: allocated %d blocks at %d",
+                    num_blocks, start,
+                )
+                return block_list
 
-    def _allocate_contiguous(self, num_blocks: int) -> Optional[List[int]]:
+        logger.warning(
+            "first_fit: cannot allocate %d contiguous blocks", num_blocks
+        )
+        return None
+
+    def _best_fit_contiguous(self, num_blocks: int) -> Optional[List[int]]:
         """
-        Internal: allocate a contiguous run of blocks using the
-        configured strategy.
+        Best-fit contiguous allocation.
+
+        Scans the *entire* bitmap to find all free regions, then picks
+        the one whose size is closest to (but >= ) *num_blocks*.
+        Minimises wasted space in the chosen hole, but may create many
+        tiny unusable fragments over time.
+
+        Args:
+            num_blocks (int): Number of contiguous blocks to allocate.
+
+        Returns:
+            list[int] | None: Allocated block numbers, or None.
         """
-        start = self.find_contiguous_space(num_blocks)
-        if start is None:
+        regions = self.get_all_free_regions()
+        best = None  # (start, length)
+
+        for start, length in regions:
+            if length >= num_blocks:
+                if best is None or length < best[1]:
+                    best = (start, length)
+
+        if best is None:
             logger.warning(
-                "Cannot allocate %d contiguous blocks (strategy=%s)",
-                num_blocks, self.allocation_strategy,
+                "best_fit: cannot allocate %d contiguous blocks", num_blocks
             )
             return None
 
-        block_list = list(range(start, start + num_blocks))
+        block_list = list(range(best[0], best[0] + num_blocks))
         for b in block_list:
             self.bitmap[b] = 1
-
         logger.debug(
-            "Allocated %d contiguous blocks starting at %d", num_blocks, start
+            "best_fit: allocated %d blocks at %d (hole size %d)",
+            num_blocks, best[0], best[1],
         )
         return block_list
 
-    def _allocate_scattered(self, num_blocks: int) -> Optional[List[int]]:
+    def _worst_fit_contiguous(self, num_blocks: int) -> Optional[List[int]]:
         """
-        Internal: allocate blocks from anywhere on disk (non-contiguous).
+        Worst-fit contiguous allocation.
 
-        Scans from the beginning and picks the first *num_blocks* free
-        blocks found.
+        Scans the entire bitmap to find the *largest* free region and
+        allocates from the start of that region. This maximises the
+        remaining contiguous space after the allocation, which can
+        help reduce future fragmentation for large requests.
+
+        Args:
+            num_blocks (int): Number of contiguous blocks to allocate.
+
+        Returns:
+            list[int] | None: Allocated block numbers, or None.
+        """
+        regions = self.get_all_free_regions()
+        worst = None  # (start, length)
+
+        for start, length in regions:
+            if length >= num_blocks:
+                if worst is None or length > worst[1]:
+                    worst = (start, length)
+
+        if worst is None:
+            logger.warning(
+                "worst_fit: cannot allocate %d contiguous blocks", num_blocks
+            )
+            return None
+
+        block_list = list(range(worst[0], worst[0] + num_blocks))
+        for b in block_list:
+            self.bitmap[b] = 1
+        logger.debug(
+            "worst_fit: allocated %d blocks at %d (hole size %d)",
+            num_blocks, worst[0], worst[1],
+        )
+        return block_list
+
+    # ------------------------------------------------------------------ #
+    #  Scattered (non-contiguous) allocation
+    # ------------------------------------------------------------------ #
+
+    def _scattered_fit(self, num_blocks: int) -> Optional[List[int]]:
+        """
+        Scattered (non-contiguous) allocation.
+
+        Collects any *num_blocks* free blocks by scanning from block 0.
+        The returned blocks are not guaranteed to be consecutive.
+
+        Args:
+            num_blocks (int): Number of blocks to allocate.
+
+        Returns:
+            list[int] | None: Allocated block numbers, or None if
+                fewer than *num_blocks* are available.
         """
         if self.get_free_count() < num_blocks:
             logger.warning(
-                "Cannot allocate %d scattered blocks — only %d free",
+                "scattered_fit: cannot allocate %d blocks — only %d free",
                 num_blocks, self.get_free_count(),
             )
             return None
@@ -365,7 +504,9 @@ class FreeSpaceManager:
                 if len(allocated) == num_blocks:
                     break
 
-        logger.debug("Allocated %d scattered blocks: %s", num_blocks, allocated)
+        logger.debug(
+            "scattered_fit: allocated %d blocks: %s", num_blocks, allocated
+        )
         return allocated
 
     # ------------------------------------------------------------------ #
