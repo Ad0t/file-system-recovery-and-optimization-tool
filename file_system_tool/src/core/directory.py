@@ -5,6 +5,23 @@ Provides DirectoryNode and DirectoryTree classes for managing
 the hierarchical directory structure of the simulated file system.
 Supports absolute and relative path resolution, recursive operations,
 and tree visualization.
+
+Dependencies:
+    - re (stdlib): Name validation.
+    - datetime (stdlib): Creation timestamps.
+    - Inode (type-checking only): Avoids circular import.
+
+Usage::
+
+    from src.core.directory import DirectoryTree
+    from src.core.inode import Inode
+
+    tree = DirectoryTree()
+    tree.create_directory('/home/user/docs')    # mkdir -p
+    inode = Inode(inode_number=1, file_type='file')
+    tree.create_file('/home/user/docs/notes.txt', inode)
+    tree.change_directory('/home/user')
+    print(tree.get_tree_structure())
 """
 
 import logging
@@ -263,6 +280,14 @@ class DirectoryTree:
         Returns:
             bool: True if the directory was created (or already exists),
                 False on validation error.
+
+        Example::
+
+            >>> tree = DirectoryTree()
+            >>> tree.create_directory('/home/user/docs')
+            True
+            >>> tree.resolve_path('/home/user/docs') is not None
+            True
         """
         is_absolute, parts = self._split_path(path)
         if not parts:

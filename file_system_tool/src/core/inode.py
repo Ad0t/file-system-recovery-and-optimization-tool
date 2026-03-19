@@ -4,6 +4,23 @@ inode.py - Inode (index node) metadata module.
 Provides an Inode class that stores all metadata for a single file
 or directory in the simulated file system, including timestamps,
 permissions, size tracking, and multi-level block pointers.
+
+Dependencies:
+    - datetime (stdlib): Timestamp management.
+    - math (stdlib): Block count calculation.
+    - FileSystemConfig: Pointer limits and block sizes from constants.
+
+Usage::
+
+    from src.core.inode import Inode
+
+    inode = Inode(inode_number=1, file_type='file', size=8192)
+    inode.add_block_pointer(100)   # add direct pointer
+    inode.update_size(16384)       # updates block_count too
+    print(inode.to_dict())         # serializable representation
+
+    # Check max file size the inode structure can address
+    max_bytes = Inode.calculate_max_file_size()  # ~4 GB with 4 KB blocks
 """
 
 import logging
@@ -65,6 +82,14 @@ class Inode:
         Raises:
             ValueError: If *file_type* is not ``'file'`` or
                 ``'directory'``, or if *size* is negative.
+
+        Example::
+
+            >>> inode = Inode(inode_number=1, file_type='file', size=4096)
+            >>> inode.block_count
+            1
+            >>> inode.permissions
+            'rwx'
         """
         if file_type not in ("file", "directory"):
             raise ValueError(

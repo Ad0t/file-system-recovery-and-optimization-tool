@@ -4,6 +4,19 @@ free_space.py - Free space management module.
 Provides a FreeSpaceManager class that tracks available disk blocks
 using a bitmap (bitarray) approach. Supports contiguous and scattered
 allocation with first-fit, best-fit, and worst-fit strategies.
+
+Dependencies:
+    - bitarray: Efficient bit-level bitmap for block tracking.
+    - FileSystemConfig: Default block count from constants.
+
+Usage::
+
+    from src.core.free_space import FreeSpaceManager
+
+    fsm = FreeSpaceManager(total_blocks=1000, strategy='first_fit')
+    blocks = fsm.allocate_blocks(10, contiguous=True)  # [0..9]
+    fsm.deallocate_blocks(blocks)                      # free them
+    print(fsm.get_allocation_map())                    # stats dict
 """
 
 import logging
@@ -107,6 +120,18 @@ class FreeSpaceManager:
 
         Raises:
             ValueError: If num_blocks is not positive.
+
+        Example::
+
+            >>> fsm = FreeSpaceManager(total_blocks=100)
+            >>> fsm.allocate_blocks(5, contiguous=True)
+            [0, 1, 2, 3, 4]
+            >>> fsm.allocate_blocks(3, contiguous=False)
+            [5, 6, 7]
+
+        Note:
+            Allocation marks blocks as used in the internal bitmap.
+            Call ``deallocate_blocks()`` to free them later.
         """
         if num_blocks <= 0:
             raise ValueError(

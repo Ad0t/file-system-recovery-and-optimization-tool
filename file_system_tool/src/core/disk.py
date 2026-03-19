@@ -5,6 +5,20 @@ Provides a Disk class that simulates a block-based storage device
 with configurable block size, total blocks, and I/O tracking metadata.
 Supports single and batch I/O, persistence via pickle, and per-block
 status inspection.
+
+Dependencies:
+    - pickle (stdlib): Disk state serialization.
+    - os (stdlib): Directory creation for persistence.
+    - FileSystemConfig: Default block/disk sizes from constants.
+
+Usage::
+
+    from src.core.disk import Disk
+
+    disk = Disk(total_blocks=1024, block_size=4096)
+    disk.write_block(0, b"hello")
+    data = disk.read_block(0)      # b"hello"
+    disk.save_to_file("data/disk.img")
 """
 
 import logging
@@ -89,6 +103,16 @@ class Disk:
 
         Raises:
             IndexError: If block_num is outside [0, total_blocks).
+
+        Example::
+
+            >>> disk = Disk(total_blocks=10)
+            >>> disk.write_block(0, b"hello")
+            True
+            >>> disk.read_block(0)
+            b'hello'
+            >>> disk.read_block(1) is None  # empty block
+            True
         """
         if not (0 <= block_num < self.total_blocks):
             raise IndexError(
@@ -117,6 +141,14 @@ class Disk:
             IndexError: If block_num is outside [0, total_blocks).
             TypeError:  If data is not bytes or bytearray.
             ValueError: If data length exceeds block_size.
+
+        Example::
+
+            >>> disk = Disk(total_blocks=10)
+            >>> disk.write_block(0, b"block data")
+            True
+            >>> disk.write_block(0, b"x" * 5000)  # too large
+            ValueError: Data size (5000 bytes) exceeds block size (4096 bytes)
         """
         if not (0 <= block_num < self.total_blocks):
             raise IndexError(
