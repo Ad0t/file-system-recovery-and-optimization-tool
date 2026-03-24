@@ -1,68 +1,69 @@
-"""Tests for the Directory and DirectoryEntry classes."""
+"""Tests for the DirectoryNode and DirectoryTree classes."""
 
 import pytest
-from src.core.directory import Directory, DirectoryEntry
-from src.utils.constants import INODE_TYPE_FILE, INODE_TYPE_DIRECTORY
+from src.core.directory import DirectoryNode, DirectoryTree
 
 
-class TestDirectoryEntry:
-    """Test suite for DirectoryEntry."""
+class TestDirectoryNode:
+    """Test suite for DirectoryNode."""
 
-    def test_file_entry(self):
-        entry = DirectoryEntry("test.txt", inode_id=1, entry_type=INODE_TYPE_FILE)
-        assert entry.name == "test.txt"
-        assert entry.is_file is True
-        assert entry.is_directory is False
+    def test_file_node(self):
+        node = DirectoryNode("test.txt", is_directory=False)
+        assert node.name == "test.txt"
+        assert node.is_directory is False
 
-    def test_directory_entry(self):
-        entry = DirectoryEntry("subdir", inode_id=2, entry_type=INODE_TYPE_DIRECTORY)
-        assert entry.is_directory is True
+    def test_directory_node(self):
+        node = DirectoryNode("subdir", is_directory=True)
+        assert node.is_directory is True
 
 
-class TestDirectory:
-    """Test suite for Directory."""
+class TestDirectoryTree:
+    """Test suite for DirectoryTree."""
 
     def test_add_entry(self):
-        d = Directory("root", inode_id=0)
-        entry = d.add_entry("file.txt", inode_id=1)
-        assert entry is not None
-        assert len(d) == 1
+        tree = DirectoryTree()
+        result = tree.create_directory("/mydir")
+        assert result is True
+        assert tree.resolve_path("/mydir") is not None
 
     def test_add_duplicate_entry(self):
-        d = Directory("root", inode_id=0)
-        d.add_entry("file.txt", inode_id=1)
-        assert d.add_entry("file.txt", inode_id=2) is None
+        tree = DirectoryTree()
+        tree.create_directory("/mydir")
+        # Creating the same directory again should succeed (mkdir -p behavior)
+        result = tree.create_directory("/mydir")
+        assert result is True
 
     def test_remove_entry(self):
-        d = Directory("root", inode_id=0)
-        d.add_entry("file.txt", inode_id=1)
-        removed = d.remove_entry("file.txt")
-        assert removed is not None
-        assert len(d) == 0
+        tree = DirectoryTree()
+        tree.create_directory("/mydir")
+        removed = tree.delete("/mydir")
+        assert removed is True
+        assert tree.resolve_path("/mydir") is None
 
     def test_remove_nonexistent(self):
-        d = Directory("root", inode_id=0)
-        assert d.remove_entry("nope.txt") is None
+        tree = DirectoryTree()
+        assert tree.delete("/nope") is False
 
     def test_get_entry(self):
-        d = Directory("root", inode_id=0)
-        d.add_entry("file.txt", inode_id=1)
-        entry = d.get_entry("file.txt")
-        assert entry.name == "file.txt"
+        tree = DirectoryTree()
+        tree.create_directory("/mydir")
+        node = tree.resolve_path("/mydir")
+        assert node is not None
+        assert node.name == "mydir"
 
     def test_list_entries(self):
-        d = Directory("root", inode_id=0)
-        d.add_entry("a.txt", inode_id=1)
-        d.add_entry("b.txt", inode_id=2)
-        entries = d.list_entries()
+        tree = DirectoryTree()
+        tree.create_directory("/a")
+        tree.create_directory("/b")
+        entries = tree.list_directory("/")
         assert len(entries) == 2
 
     def test_get_path_root(self):
-        d = Directory("root", inode_id=0, parent=None)
-        assert d.get_path() == "/"
+        tree = DirectoryTree()
+        assert tree.root.get_full_path() == "/"
 
     def test_get_path_nested(self):
-        root = Directory("root", inode_id=0, parent=None)
-        child = Directory("home", inode_id=1, parent=root)
-        grandchild = Directory("user", inode_id=2, parent=child)
-        assert grandchild.get_path() == "/home/user"
+        tree = DirectoryTree()
+        tree.create_directory("/home/user")
+        node = tree.resolve_path("/home/user")
+        assert node.get_full_path() == "/home/user"
