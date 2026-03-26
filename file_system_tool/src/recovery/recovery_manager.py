@@ -66,6 +66,7 @@ class RecoveryManager:
         # Scan disk (naive check for demonstration)
         if self.disk and hasattr(self.disk, 'read_block'):
             try:
+<<<<<<< HEAD
                 # Real check for all blocks
                 total_blocks = getattr(self.disk, 'total_blocks', 1024)
                 for i in range(total_blocks):
@@ -73,12 +74,24 @@ class RecoveryManager:
                     if isinstance(block_data, bytes) and b'CORRUPTED' in block_data:
                         has_corruption = True
                         corrupted_blocks.append(i)
+=======
+                # Mock check
+                first_block = self.disk.read_block(1)
+                if isinstance(first_block, bytes) and b'CORRUPTED' in first_block:
+                    has_corruption = True
+                    corrupted_blocks.append(1)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
             except Exception as e:
                 logger.error(f"Error scanning disk: {e}")
 
         # Check metadata
+<<<<<<< HEAD
         if self.fat and hasattr(self.fat, 'file_to_blocks'):
             fat_entries = self.fat.file_to_blocks
+=======
+        if self.fat and hasattr(self.fat, 'table'):
+            fat_entries = self.fat.table
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
             for k, v in fat_entries.items():
                 if v == 9999999: # Arbitrary marker that we used for corruption
                     inconsistent_metadata.append(f'FAT entry {k} has invalid pointer')
@@ -130,19 +143,30 @@ class RecoveryManager:
             if status == 'COMMITTED':
                 if self.redo_transaction(entry):
                     recovered_transactions.append(tx_id)
+<<<<<<< HEAD
                     entry['status'] = 'COMPLETED'
+=======
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 else:
                     errors.append(f"Failed to redo transaction {tx_id}")
                     success = False
             elif status in ('PENDING', 'UNCOMMITTED', 'CORRUPT_STATE'):
                 if self.undo_transaction(entry):
                     rolled_back_transactions.append(tx_id)
+<<<<<<< HEAD
                     entry['status'] = 'ABORTED'
                 else:
                     errors.append(f"Failed to undo transaction {tx_id}")
                     success = False
             elif status in ('ABORTED', 'COMPLETED'):
                 # Already rolled back or completed, skip
+=======
+                else:
+                    errors.append(f"Failed to undo transaction {tx_id}")
+                    success = False
+            elif status == 'ABORTED':
+                # Already rolled back, skip
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 pass
 
         # Optional Verification Step
@@ -242,15 +266,25 @@ class RecoveryManager:
         
         if self.fat and self.fsm:
             allocated_in_fat = set()
+<<<<<<< HEAD
             if hasattr(self.fat, 'file_to_blocks'):
                 for k, v in self.fat.file_to_blocks.items():
+=======
+            if hasattr(self.fat, 'table'):
+                for k, v in self.fat.table.items():
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                     if isinstance(v, list):
                         allocated_in_fat.update(v)
                     else:
                         allocated_in_fat.add(v)
                         
+<<<<<<< HEAD
             if hasattr(self.fsm, 'bitmap'):
                 allocated_in_fsm = {i for i, b in enumerate(self.fsm.bitmap) if b}
+=======
+            if hasattr(self.fsm, 'allocated_blocks'):
+                allocated_in_fsm = set(self.fsm.allocated_blocks)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 
                 # Check: All blocks in FAT are allocated in FSM
                 missing_in_fsm = allocated_in_fat - allocated_in_fsm
@@ -326,8 +360,13 @@ class RecoveryManager:
                 pass
                 
             # Assume successful rebuild
+<<<<<<< HEAD
             if hasattr(self.fat, 'file_to_blocks'):
                 self.fat.file_to_blocks = new_table
+=======
+            if hasattr(self.fat, 'table'):
+                self.fat.table = new_table
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
             return True
         except Exception as e:
             logger.error(f"Rebuilding allocation table failed: {e}")
@@ -350,8 +389,13 @@ class RecoveryManager:
         
         if self.disk and self.fat:
             try:
+<<<<<<< HEAD
                 if hasattr(self.fat, 'file_to_blocks'):
                     for file_id, blocks in self.fat.file_to_blocks.items():
+=======
+                if hasattr(self.fat, 'table'):
+                    for file_id, blocks in self.fat.table.items():
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         try:
                             file_data = b""
                             block_list = blocks if isinstance(blocks, list) else [blocks]
@@ -696,19 +740,29 @@ class RecoveryManager:
         
         # Tracking the mapping state difference as simple demonstration
         fat_blocks = set()
+<<<<<<< HEAD
         if self.fat and hasattr(self.fat, 'file_to_blocks'):
             for v in self.fat.file_to_blocks.values():
+=======
+        if self.fat and hasattr(self.fat, 'table'):
+            for v in self.fat.table.values():
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 if isinstance(v, list):
                     fat_blocks.update(v)
                 else:
                     fat_blocks.add(v)
                     
+<<<<<<< HEAD
         fsm_blocks = {i for i, bit in enumerate(self.fsm.bitmap) if bit} if self.fsm and hasattr(self.fsm, 'bitmap') else set()
+=======
+        fsm_blocks = set(self.fsm.allocated_blocks) if self.fsm and hasattr(self.fsm, 'allocated_blocks') else set()
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
         
         blocks_marked_free_but_allocated = list(fat_blocks - fsm_blocks)
         blocks_marked_allocated_but_free = list(fsm_blocks - fat_blocks)
         
         if auto_repair:
+<<<<<<< HEAD
             if self.fsm and hasattr(self.fsm, 'bitmap'):
                 for b in blocks_marked_free_but_allocated:
                     if self.fsm.bitmap[b] == 0:
@@ -718,6 +772,17 @@ class RecoveryManager:
                 for b in blocks_marked_allocated_but_free:
                     if self.fsm.bitmap[b] == 1:
                         self.fsm.bitmap[b] = 0
+=======
+            if self.fsm and hasattr(self.fsm, 'allocate_block'):
+                for b in blocks_marked_free_but_allocated:
+                    if b not in getattr(self.fsm, 'allocated_blocks', []):
+                        self.fsm.allocated_blocks.append(b)
+                        
+            if self.fsm and hasattr(self.fsm, 'free_block'):
+                for b in blocks_marked_allocated_but_free:
+                    if b in getattr(self.fsm, 'allocated_blocks', []):
+                        self.fsm.allocated_blocks.remove(b)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         
             # Mark issues resolved if auto_repair succeeded
             blocks_marked_free_but_allocated = []
@@ -764,7 +829,11 @@ class RecoveryManager:
             # Scan free blocks for file signatures fallback
             if self.disk and self.fsm and hasattr(self.fsm, 'total_blocks'):
                 total = getattr(self.fsm, 'total_blocks', getattr(self.disk, 'total_blocks', 1024))
+<<<<<<< HEAD
                 allocated = {i for i, b in enumerate(self.fsm.bitmap) if b} if hasattr(self.fsm, 'bitmap') else set()
+=======
+                allocated = set(getattr(self.fsm, 'allocated_blocks', []))
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 for block_num in range(total):
                     if block_num not in allocated:
                         data = self.disk.read_block(block_num)

@@ -43,17 +43,37 @@ class PerformanceAnalyzer:
             # Try parsing FSM/Disk metrics
             fsm = self.file_system_components.get('fsm')
             disk = self.file_system_components.get('disk')
+<<<<<<< HEAD
             if fsm and getattr(disk, 'total_blocks', 0) > 0:
                 total = disk.total_blocks
                 used = fsm.get_allocated_count() if hasattr(fsm, 'get_allocated_count') else 0
+=======
+            if fsm and hasattr(fsm, 'allocated_blocks') and getattr(disk, 'total_blocks', 0) > 0:
+                total = disk.total_blocks
+                used = len(getattr(fsm, 'allocated_blocks', []))
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 metrics['disk_usage_percentage'] = (used / total) * 100.0
                 metrics['free_space_percentage'] = 100.0 - metrics['disk_usage_percentage']
                 
             # Try parsing fragmentation
             fat = self.file_system_components.get('fat')
+<<<<<<< HEAD
             if fat and hasattr(fat, 'get_fragmentation_stats'):
                 stats = fat.get_fragmentation_stats()
                 metrics['fragmentation_percentage'] = stats.get('fragmentation_percentage', 0.0)
+=======
+            if fat and hasattr(fat, 'table'):
+                total_files = len(fat.table)
+                frag_files = 0
+                for blocks in fat.table.values():
+                    if isinstance(blocks, list) and len(blocks) > 1:
+                        for i in range(1, len(blocks)):
+                            if blocks[i] != blocks[i-1] + 1:
+                                frag_files += 1
+                                break
+                if total_files > 0:
+                    metrics['fragmentation_percentage'] = (frag_files / total_files) * 100.0
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                     
             # Try parsing cache hit rate
             cache = self.file_system_components.get('cache')

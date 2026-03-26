@@ -40,8 +40,13 @@ class Defragmenter:
         file_scores = []
         total_gaps = 0
         
+<<<<<<< HEAD
         if self.fat and hasattr(self.fat, 'file_to_blocks'):
             for file_id, blocks in self.fat.file_to_blocks.items():
+=======
+        if self.fat and hasattr(self.fat, 'table'):
+            for file_id, blocks in self.fat.table.items():
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 if isinstance(blocks, list) and len(blocks) > 0:
                     total_files += 1
                     
@@ -94,8 +99,13 @@ class Defragmenter:
             'block_layout': []
         }
         
+<<<<<<< HEAD
         if self.fat and hasattr(self.fat, 'file_to_blocks') and inode_number in self.fat.file_to_blocks:
             blocks = self.fat.file_to_blocks[inode_number]
+=======
+        if self.fat and hasattr(self.fat, 'table') and inode_number in self.fat.table:
+            blocks = self.fat.table[inode_number]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
             if isinstance(blocks, list) and blocks:
                 result['block_layout'] = list(blocks)
                 result['total_blocks'] = len(blocks)
@@ -122,8 +132,13 @@ class Defragmenter:
         old_frag = self.calculate_file_fragmentation(inode_number).get('fragmentation_score', 0.0)
         
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks') and inode_number in self.fat.file_to_blocks:
                 old_blocks = self.fat.file_to_blocks[inode_number]
+=======
+            if self.fat and hasattr(self.fat, 'table') and inode_number in self.fat.table:
+                old_blocks = self.fat.table[inode_number]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 if isinstance(old_blocks, list) and len(old_blocks) > 1:
                     num_blocks = len(old_blocks)
                     new_start = self._find_contiguous_space(num_blocks)
@@ -134,6 +149,7 @@ class Defragmenter:
                         # Copy data
                         if self._copy_blocks(old_blocks, new_blocks):
                             # Mark old as free, new as allocated
+<<<<<<< HEAD
                             if self.fsm and hasattr(self.fsm, 'bitmap'):
                                 for b in old_blocks:
                                     self.fsm.bitmap[b] = 0
@@ -142,6 +158,18 @@ class Defragmenter:
                                         
                             # Update fat
                             self.fat.file_to_blocks[inode_number] = new_blocks
+=======
+                            if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                                for b in old_blocks:
+                                    if b in self.fsm.allocated_blocks:
+                                        self.fsm.allocated_blocks.remove(b)
+                                for b in new_blocks:
+                                    if b not in self.fsm.allocated_blocks:
+                                        self.fsm.allocated_blocks.append(b)
+                                        
+                            # Update fat
+                            self.fat.table[inode_number] = new_blocks
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                             
                             # Attempt to update inode pointer directly if directory_tree exposes it
                             inode_obj = None
@@ -201,8 +229,13 @@ class Defragmenter:
             file_scores.sort(key=lambda x: x['total_blocks'], reverse=True)
             targets = [f['inode_number'] for f in file_scores if f['fragmentation_score'] > 0]
         elif strategy == 'sequential':
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 targets = sorted(list(self.fat.file_to_blocks.keys()))
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                targets = sorted(list(self.fat.table.keys()))
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 
         for inode in targets:
             report = self.defragment_file(inode)
@@ -231,12 +264,21 @@ class Defragmenter:
         blocks_moved = 0
         
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 sorted_inodes = sorted(self.fat.file_to_blocks.keys())
                 current_free_pointer = 0
                 
                 for inode in sorted_inodes:
                     blocks = self.fat.file_to_blocks.get(inode)
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                sorted_inodes = sorted(self.fat.table.keys())
+                current_free_pointer = 0
+                
+                for inode in sorted_inodes:
+                    blocks = self.fat.table.get(inode)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                     if not isinstance(blocks, list) or not blocks:
                         continue
                         
@@ -244,7 +286,11 @@ class Defragmenter:
                     if blocks[0] != current_free_pointer:
                         new_blocks = list(range(current_free_pointer, current_free_pointer + num_blocks))
                         if self._copy_blocks(blocks, new_blocks):
+<<<<<<< HEAD
                             self.fat.file_to_blocks[inode] = new_blocks
+=======
+                            self.fat.table[inode] = new_blocks
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                             if self.directory_tree and hasattr(self.directory_tree, 'inodes'):
                                 inode_obj = self.directory_tree.inodes.get(inode)
                                 if inode_obj:
@@ -254,10 +300,15 @@ class Defragmenter:
                             
                     current_free_pointer += num_blocks
                     
+<<<<<<< HEAD
                 if self.fsm and hasattr(self.fsm, 'bitmap'):
                     self.fsm.bitmap.setall(0)
                     for i in range(current_free_pointer):
                         self.fsm.bitmap[i] = 1
+=======
+                if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                    self.fsm.allocated_blocks = list(range(current_free_pointer))
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
         except Exception as e:
             logger.error(f"Free space compaction failed: {e}")
             
@@ -277,24 +328,40 @@ class Defragmenter:
         files_moved = 0
         
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 if access_patterns:
                     sorted_targets = sorted(
                         self.fat.file_to_blocks.keys(), 
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                if access_patterns:
+                    sorted_targets = sorted(
+                        self.fat.table.keys(), 
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         key=lambda x: access_patterns.get(x, 0), 
                         reverse=True
                     )
                 else:
+<<<<<<< HEAD
                     sorted_targets = sorted(self.fat.file_to_blocks.keys(), key=lambda x: len(self.fat.file_to_blocks[x]) if isinstance(self.fat.file_to_blocks[x], list) else 0)
                 
                 current_pointer = 0
                 for inode in sorted_targets:
                     blocks = self.fat.file_to_blocks.get(inode)
+=======
+                    sorted_targets = sorted(self.fat.table.keys(), key=lambda x: len(self.fat.table[x]) if isinstance(self.fat.table[x], list) else 0)
+                
+                current_pointer = 0
+                for inode in sorted_targets:
+                    blocks = self.fat.table.get(inode)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                     if isinstance(blocks, list) and blocks:
                         num = len(blocks)
                         if blocks[0] != current_pointer:
                             new_b = list(range(current_pointer, current_pointer + num))
                             if self._copy_blocks(blocks, new_b):
+<<<<<<< HEAD
                                 self.fat.file_to_blocks[inode] = new_b
                                 files_moved += 1
                         current_pointer += num
@@ -303,6 +370,14 @@ class Defragmenter:
                     self.fsm.bitmap.setall(0)
                     for i in range(current_pointer):
                         self.fsm.bitmap[i] = 1
+=======
+                                self.fat.table[inode] = new_b
+                                files_moved += 1
+                        current_pointer += num
+                        
+                if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                    self.fsm.allocated_blocks = list(range(current_pointer))
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
 
         except Exception as e:
             logger.error(f"Optimization failed: {e}")
@@ -368,9 +443,15 @@ class Defragmenter:
                 analysis = self.analyze_fragmentation()
                 simulation_results['expected_improvement'] = analysis.get('fragmentation_percentage', 0.0)
                 
+<<<<<<< HEAD
                 if self.fat and hasattr(self.fat, 'file_to_blocks'):
                     total_frag_blocks = 0
                     for blocks in self.fat.file_to_blocks.values():
+=======
+                if self.fat and hasattr(self.fat, 'table'):
+                    total_frag_blocks = 0
+                    for blocks in self.fat.table.values():
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         if isinstance(blocks, list):
                             for i in range(1, len(blocks)):
                                 if blocks[i] != blocks[i-1] + 1:
@@ -390,8 +471,13 @@ class Defragmenter:
         """
         targets = []
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 for inode in self.fat.file_to_blocks.keys():
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                for inode in self.fat.table.keys():
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                     frag = self.calculate_file_fragmentation(inode)
                     if frag.get('fragmentation_score', 0.0) >= threshold:
                         targets.append(inode)
@@ -412,6 +498,7 @@ class Defragmenter:
         }
         
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 sim_pointer = 0
                 if self.fsm and hasattr(self.fsm, 'bitmap'):
@@ -420,6 +507,16 @@ class Defragmenter:
                 for inode in inode_numbers:
                     if inode in self.fat.file_to_blocks:
                         blocks = self.fat.file_to_blocks[inode]
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                sim_pointer = 0
+                if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                    sim_pointer = max(self.fsm.allocated_blocks or [0]) + 1
+                    
+                for inode in inode_numbers:
+                    if inode in self.fat.table:
+                        blocks = self.fat.table[inode]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         if isinstance(blocks, list) and blocks:
                             num = len(blocks)
                             new_loc = list(range(sim_pointer, sim_pointer + num))
@@ -457,6 +554,7 @@ class Defragmenter:
             new_b = target_op.get('new_blocks', [])
             
             if self._copy_blocks(new_b, old_b):
+<<<<<<< HEAD
                 if self.fat and hasattr(self.fat, 'file_to_blocks'):
                     self.fat.file_to_blocks[inode] = old_b
                     
@@ -465,6 +563,18 @@ class Defragmenter:
                         self.fsm.bitmap[b] = 0
                     for b in old_b:
                         self.fsm.bitmap[b] = 1
+=======
+                if self.fat and hasattr(self.fat, 'table'):
+                    self.fat.table[inode] = old_b
+                    
+                if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                    for b in new_b:
+                        if b in self.fsm.allocated_blocks:
+                            self.fsm.allocated_blocks.remove(b)
+                    for b in old_b:
+                        if b not in self.fsm.allocated_blocks:
+                            self.fsm.allocated_blocks.append(b)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                             
                 return True
         except Exception as e:
@@ -477,14 +587,23 @@ class Defragmenter:
         Find starting block for contiguous space.
         """
         try:
+<<<<<<< HEAD
             if self.fsm and hasattr(self.fsm, 'bitmap'):
+=======
+            if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                allocated = set(self.fsm.allocated_blocks)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 total_blocks = getattr(self.fsm, 'total_blocks', getattr(self.disk, 'total_blocks', 1024))
                 
                 consecutive_free = 0
                 start_candidate = None
                 
                 for b in range(total_blocks):
+<<<<<<< HEAD
                     if self.fsm.bitmap[b] == 0:
+=======
+                    if b not in allocated:
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         if start_candidate is None:
                             start_candidate = b
                         consecutive_free += 1
@@ -539,14 +658,20 @@ class Defragmenter:
         success = False
         blocks_moved = 0
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks') and inode_number in self.fat.file_to_blocks:
                 old_blocks = self.fat.file_to_blocks[inode_number]
+=======
+            if self.fat and hasattr(self.fat, 'table') and inode_number in self.fat.table:
+                old_blocks = self.fat.table[inode_number]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 if isinstance(old_blocks, list) and len(old_blocks) > 1:
                     num_blocks = len(old_blocks)
                     new_start = self._find_contiguous_space(num_blocks)
                     if new_start is not None:
                         new_blocks = list(range(new_start, new_start + num_blocks))
                         # Copy-on-write logic mock: allocate first, copy, then swap pointers atomically
+<<<<<<< HEAD
                         if self.fsm and hasattr(self.fsm, 'bitmap'):
                             for b in new_blocks:
                                 self.fsm.bitmap[b] = 1
@@ -554,15 +679,32 @@ class Defragmenter:
                         if self._copy_blocks(old_blocks, new_blocks):
                             # Atomic swap mock
                             self.fat.file_to_blocks[inode_number] = new_blocks
+=======
+                        if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                            for b in new_blocks:
+                                if b not in self.fsm.allocated_blocks:
+                                    self.fsm.allocated_blocks.append(b)
+                                    
+                        if self._copy_blocks(old_blocks, new_blocks):
+                            # Atomic swap mock
+                            self.fat.table[inode_number] = new_blocks
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                             if self.directory_tree and hasattr(self.directory_tree, 'inodes'):
                                 inode_obj = self.directory_tree.inodes.get(inode_number)
                                 if inode_obj:
                                     self._update_file_pointers(inode_obj, new_blocks)
                             
                             # Free old blocks
+<<<<<<< HEAD
                             if self.fsm and hasattr(self.fsm, 'bitmap'):
                                 for b in old_blocks:
                                     self.fsm.bitmap[b] = 0
+=======
+                            if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                                for b in old_blocks:
+                                    if b in self.fsm.allocated_blocks:
+                                        self.fsm.allocated_blocks.remove(b)
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                                         
                             blocks_moved = num_blocks
                             success = True
@@ -591,15 +733,23 @@ class Defragmenter:
         files_moved = 0
         try:
             current_pointer = 0
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 for inode in file_list:
                     if inode in self.fat.file_to_blocks:
                         blocks = self.fat.file_to_blocks[inode]
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                for inode in file_list:
+                    if inode in self.fat.table:
+                        blocks = self.fat.table[inode]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         if isinstance(blocks, list) and blocks:
                             num = len(blocks)
                             new_b = list(range(current_pointer, current_pointer + num))
                             if blocks != new_b:
                                 if self._copy_blocks(blocks, new_b):
+<<<<<<< HEAD
                                     self.fat.file_to_blocks[inode] = new_b
                                     files_moved += 1
                             current_pointer += num
@@ -607,6 +757,14 @@ class Defragmenter:
                 if self.fsm and hasattr(self.fsm, 'bitmap'):
                     for i in range(current_pointer):
                         self.fsm.bitmap[i] = 1
+=======
+                                    self.fat.table[inode] = new_b
+                                    files_moved += 1
+                            current_pointer += num
+                            
+                if self.fsm and hasattr(self.fsm, 'allocated_blocks'):
+                    self.fsm.allocated_blocks = list(set(self.fsm.allocated_blocks + list(range(current_pointer))))
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
         except Exception as e:
             logger.error(f"Sequential access optimization failed: {e}")
             
@@ -624,21 +782,34 @@ class Defragmenter:
         start_time = time.time()
         files_moved = 0
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks') and self.disk:
+=======
+            if self.fat and hasattr(self.fat, 'table') and self.disk:
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                 total_blocks = getattr(self.disk, 'total_blocks', 1024)
                 spacing = total_blocks // (len(file_list) + 1) if file_list else 1
                 
                 current_pointer = spacing
                 for inode in file_list:
+<<<<<<< HEAD
                     if inode in self.fat.file_to_blocks:
                         blocks = self.fat.file_to_blocks[inode]
+=======
+                    if inode in self.fat.table:
+                        blocks = self.fat.table[inode]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         if isinstance(blocks, list) and blocks:
                             num = len(blocks)
                             if current_pointer + num < total_blocks:
                                 new_b = list(range(current_pointer, current_pointer + num))
                                 if blocks != new_b:
                                     if self._copy_blocks(blocks, new_b):
+<<<<<<< HEAD
                                         self.fat.file_to_blocks[inode] = new_b
+=======
+                                        self.fat.table[inode] = new_b
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                                         files_moved += 1
                             current_pointer += spacing
                             
@@ -656,14 +827,23 @@ class Defragmenter:
         """
         Sort defragmentation order using elevator/SCAN algorithm.
         """
+<<<<<<< HEAD
         if not self.fat or not hasattr(self.fat, 'file_to_blocks'):
+=======
+        if not self.fat or not hasattr(self.fat, 'table'):
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
             return file_list
             
         try:
             file_starts = []
             for inode in file_list:
+<<<<<<< HEAD
                 if inode in self.fat.file_to_blocks:
                     blocks = self.fat.file_to_blocks[inode]
+=======
+                if inode in self.fat.table:
+                    blocks = self.fat.table[inode]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                     if isinstance(blocks, list) and blocks:
                         file_starts.append((inode, blocks[0]))
                         
@@ -709,10 +889,17 @@ class Defragmenter:
         Prioritize defragmentation based on file access frequency.
         """
         try:
+<<<<<<< HEAD
             if not self.fat or not hasattr(self.fat, 'file_to_blocks'):
                 return []
                 
             valid_inodes = [i for i in access_log.keys() if i in self.fat.file_to_blocks]
+=======
+            if not self.fat or not hasattr(self.fat, 'table'):
+                return []
+                
+            valid_inodes = [i for i in access_log.keys() if i in self.fat.table]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
             return sorted(valid_inodes, key=lambda x: access_log[x], reverse=True)
         except Exception as e:
             logger.error(f"Prioritize by access frequency failed: {e}")
@@ -726,10 +913,17 @@ class Defragmenter:
         total_time = 0.0
         
         try:
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 for inode in inode_numbers:
                     if inode in self.fat.file_to_blocks:
                         blocks = self.fat.file_to_blocks[inode]
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                for inode in inode_numbers:
+                    if inode in self.fat.table:
+                        blocks = self.fat.table[inode]
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                         if isinstance(blocks, list):
                             num_blocks = len(blocks)
                             est_t = num_blocks * 0.005 
@@ -751,8 +945,13 @@ class Defragmenter:
             total_blocks = getattr(self.disk, 'total_blocks', 1024) if self.disk else 1024
             layout = ['.'] * total_blocks
             
+<<<<<<< HEAD
             if self.fat and hasattr(self.fat, 'file_to_blocks'):
                 for inode, blocks in self.fat.file_to_blocks.items():
+=======
+            if self.fat and hasattr(self.fat, 'table'):
+                for inode, blocks in self.fat.table.items():
+>>>>>>> ef2d4b3b3ed7213faf84993ea72d0d8e9e27b6cf
                     if isinstance(blocks, list):
                         char = str(inode % 10)
                         for b in blocks:
