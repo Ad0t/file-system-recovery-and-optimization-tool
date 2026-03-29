@@ -1,23 +1,23 @@
 """
-disk_visualizer.py - Interactive disk block visualization component.
+disk_visualizer.py — Interactive canvas-based disk block visualiser.
 
-Provides a DiskVisualizer class that renders a colored grid of disk
-blocks on a ``tk.Canvas``.  Each block is colour-coded by state (free,
-allocated, system, fragmented).  Supports tooltips on hover, click
-details, zoom in/out, file-block highlighting, fragmentation heatmap,
-animated allocation/deallocation, and PNG export.
+Renders every block on the simulated disk as a coloured rectangle
+inside a scrollable ``tk.Canvas``.  Supports:
 
-Dependencies:
-    - tkinter (stdlib): Canvas drawing and widget creation.
-    - PIL (optional): Export the visualization as a PNG image.
-    - Disk, FreeSpaceManager, FileAllocationTable: Core FS modules.
+  • Hover tooltips with block info
+  • Click for detailed block dialog
+  • File-block highlighting
+  • Fragmentation heat-map mode
+  • Zoom in / out
+  • Animated allocation / deallocation
+  • PNG export (via Pillow if available)
 
 Usage::
 
     from src.ui.disk_visualizer import DiskVisualizer
 
-    visualizer = DiskVisualizer(parent_frame, disk, fsm, fat)
-    visualizer.update_display()
+    viz = DiskVisualizer(parent_frame, disk, fsm, fat)
+    viz.draw_disk()
 """
 
 import logging
@@ -32,202 +32,191 @@ from src.core.file_allocation_table import FileAllocationTable
 
 logger = logging.getLogger(__name__)
 
+# Try to import Pillow for PNG export — graceful fallback
+try:
+    from PIL import Image, ImageDraw  # noqa: F401
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
 
-# ====================================================================== #
-#  Constants
-# ====================================================================== #
 
-# Default pixel size for each block square
-_DEFAULT_BLOCK_SIZE_PX = 14
-
-# Minimum / maximum zoom limits (pixels per block)
-_MIN_BLOCK_SIZE_PX = 4
-_MAX_BLOCK_SIZE_PX = 40
-
-# Animation step duration in milliseconds
-_ANIM_STEP_MS = 60
-_ANIM_TOTAL_STEPS = 10
-
-# Legend / stats panel height
-_LEGEND_HEIGHT = 70
-
-# Tooltip styling
-_TOOLTIP_BG = "#2a2a4a"
-_TOOLTIP_FG = "#e0e0e0"
-_TOOLTIP_FONT = ("Consolas", 9)
-
+# =========================================================================== #
+#  DiskVisualizer
+# =========================================================================== #
 
 class DiskVisualizer:
     """
-    Interactive disk block visualization drawn on a ``tk.Canvas``.
+    Interactive canvas widget that draws every disk block as a coloured
+    square and provides hover / click interactivity plus zoom and
+    animation support.
 
-    Renders a grid of colored rectangles — one per disk block — inside
-    a scrollable canvas.  Supports hover tooltips, click detail dialogs,
-    zoom, file-highlight overlays, fragmentation heatmaps, and animated
-    block operations.
-
-    Attributes:
-        parent_frame (ttk.Frame): Parent container.
-        disk (Disk): Reference to the simulated disk.
-        fsm (FreeSpaceManager): Reference to the free space manager.
-        fat (FileAllocationTable): Reference to the file allocation table.
-        canvas (tk.Canvas): Canvas widget used for drawing.
-        block_size_pixels (int): Side length of each block square (px).
-        blocks_per_row (int): Number of blocks drawn per row.
-        color_scheme (dict): Maps block state names to hex colours.
-        tooltip (tk.Label): Floating tooltip label for hover info.
+    Attributes
+    ----------
+    parent_frame : ttk.Frame
+        Container widget that hosts the canvas.
+    disk : Disk
+        The simulated disk whose blocks are visualised.
+    fsm : FreeSpaceManager
+        Free-space bitmap used to determine block state.
+    fat : FileAllocationTable
+        File-to-block / block-to-file mappings.
+    canvas : tk.Canvas
+        The Tkinter canvas that holds the drawing.
+    block_size_pixels : int
+        Side-length of each block square in pixels.
+    blocks_per_row : int
+        Number of blocks drawn per row.
+    color_scheme : dict[str, str]
+        Hex colours keyed by block-state name.
+    tooltip : tk.Toplevel | None
+        Floating tooltip window (created on demand).
     """
 
-    # ------------------------------------------------------------------ #
-    #  Initialization
-    # ------------------------------------------------------------------ #
+    # ---- sizing defaults ------------------------------------------------- #
+    _DEFAULT_BLOCK_PX = 12
+    _MIN_BLOCK_PX = 4
+    _MAX_BLOCK_PX = 40
+    _ZOOM_STEP = 2
 
-    def __init__(self, parent_frame: ttk.Frame, disk: Disk,
-                 fsm: FreeSpaceManager, fat: FileAllocationTable):
+    # ---- legend geometry ------------------------------------------------- #
+    _LEGEND_PAD = 10
+    _LEGEND_SWATCH = 14
+
+    # --------------------------------------------------------------------- #
+    #  Construction
+    # --------------------------------------------------------------------- #
+
+    def __init__(self, parent_frame: ttk.Frame,
+                 disk: Disk,
+                 fsm: FreeSpaceManager,
+                 fat: FileAllocationTable,
+                 *,
+                 directory_tree=None):
         """
-        Initialize the disk visualizer.
+        Build the disk visualiser inside *parent_frame*.
 
-        Creates the canvas with scrollbars, sets up the colour scheme,
-        binds mouse events, and performs the initial draw.
-
-        Args:
-            parent_frame (ttk.Frame): Tkinter container to pack into.
-            disk (Disk): Disk instance to visualize.
-            fsm (FreeSpaceManager): Free space manager instance.
-            fat (FileAllocationTable): File allocation table instance.
+        Parameters
+        ----------
+        parent_frame : ttk.Frame
+            Container widget.
+        disk : Disk
+            The disk model.
+        fsm : FreeSpaceManager
+            Block bitmap.
+        fat : FileAllocationTable
+            Block ownership mappings.
+        directory_tree : DirectoryTree, optional
+            Used to resolve inode numbers to file paths.
         """
         self.parent_frame = parent_frame
         self.disk = disk
         self.fsm = fsm
         self.fat = fat
+        self._dir_tree = directory_tree
 
-        # Layout parameters
-        self.block_size_pixels: int = _DEFAULT_BLOCK_SIZE_PX
-        self.blocks_per_row: int = 32  # recalculated in _calculate_layout
+        self.block_size_pixels: int = self._DEFAULT_BLOCK_PX
+        self.blocks_per_row: int = 1  # recalculated in _calculate_layout
 
-        # Highlighted inode (for file-block highlighting)
+        # Persistent visual state
         self._highlighted_inode: Optional[int] = None
-
-        # Animation state
+        self._heatmap_mode: bool = False
         self._anim_after_id: Optional[str] = None
 
-        # Color scheme
+        # ---- colour palette ---------------------------------------------- #
         self.color_scheme: Dict[str, str] = {
-            "free":        "#90EE90",   # light green
-            "allocated":   "#F08080",   # light coral
-            "system":      "#ADD8E6",   # light blue
-            "fragmented":  "#FFFF99",   # yellow
-            "highlight":   "#FFA500",   # orange  (file highlight)
-            "corrupt":     "#FF4444",   # red
-            "outline":     "#555555",
+            "free":        "#a6e3a1",   # green  (Catppuccin green)
+            "allocated":   "#f38ba8",   # red    (Catppuccin red)
+            "system":      "#89b4fa",   # blue   (Catppuccin blue)
+            "fragmented":  "#f9e2af",   # yellow (Catppuccin yellow)
+            "highlight":   "#fab387",   # orange (Catppuccin peach)
+            "outline":     "#45475a",   # border
+            "canvas_bg":   "#1e1e2e",   # background
+            "legend_bg":   "#313244",   # legend panel
+            "legend_fg":   "#cdd6f4",   # legend text
         }
 
-        # ---- Build widgets ----
-        self._build_toolbar()
-        self._build_canvas()
+        # ---- toolbar ----------------------------------------------------- #
+        toolbar = ttk.Frame(parent_frame)
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(2, 0))
+
+        ttk.Button(toolbar, text="🔍+", width=4,
+                   command=self.zoom_in).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="🔍−", width=4,
+                   command=self.zoom_out).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="🌡 Heatmap",
+                   command=self.show_fragmentation_heatmap).pack(
+                       side=tk.LEFT, padx=6)
+        ttk.Button(toolbar, text="↺ Reset",
+                   command=self._reset_view).pack(side=tk.LEFT, padx=2)
+
+        self._stats_var = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self._stats_var).pack(
+            side=tk.RIGHT, padx=6)
+
+        # ---- canvas + scrollbars ----------------------------------------- #
+        canvas_frame = ttk.Frame(parent_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        self.canvas = tk.Canvas(canvas_frame,
+                                bg=self.color_scheme["canvas_bg"],
+                                highlightthickness=0)
+
+        v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL,
+                                  command=self.canvas.yview)
+        h_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL,
+                                  command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=v_scroll.set,
+                               xscrollcommand=h_scroll.set)
+
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        v_scroll.grid(row=0, column=1, sticky="ns")
+        h_scroll.grid(row=1, column=0, sticky="ew")
+        canvas_frame.grid_rowconfigure(0, weight=1)
+        canvas_frame.grid_columnconfigure(0, weight=1)
+
+        # ---- tooltip window ---------------------------------------------- #
+        self.tooltip: Optional[tk.Toplevel] = None
         self._create_tooltip_window()
 
-        # ---- Mouse bindings ----
+        # ---- bind events ------------------------------------------------- #
         self.canvas.bind("<Motion>", self.on_mouse_move)
         self.canvas.bind("<Leave>", lambda _e: self._hide_tooltip())
         self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
 
-        # ---- Recalculate on resize ----
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        # ---- initial draw ------------------------------------------------ #
+        # We schedule the first draw so the canvas has its real size.
+        self.canvas.after(50, self.draw_disk)
 
-        # ---- Initial draw ----
-        self.parent_frame.after(100, self.draw_disk)
+    # --------------------------------------------------------------------- #
+    #  Layout calculation
+    # --------------------------------------------------------------------- #
 
-    # ------------------------------------------------------------------ #
-    #  Widget construction helpers
-    # ------------------------------------------------------------------ #
-
-    def _build_toolbar(self) -> None:
-        """Create a toolbar with zoom and heatmap controls."""
-        toolbar = ttk.Frame(self.parent_frame)
-        toolbar.pack(fill="x", padx=4, pady=(4, 0))
-
-        ttk.Button(toolbar, text="🔍+ Zoom In",
-                   command=self.zoom_in).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="🔍− Zoom Out",
-                   command=self.zoom_out).pack(side="left", padx=2)
-
-        ttk.Separator(toolbar, orient="vertical").pack(
-            side="left", fill="y", padx=6, pady=2)
-
-        ttk.Button(toolbar, text="🌡️ Heatmap",
-                   command=self.show_fragmentation_heatmap).pack(
-            side="left", padx=2)
-        ttk.Button(toolbar, text="↺ Normal View",
-                   command=self.update_display).pack(
-            side="left", padx=2)
-
-        ttk.Separator(toolbar, orient="vertical").pack(
-            side="left", fill="y", padx=6, pady=2)
-
-        ttk.Button(toolbar, text="💾 Export PNG",
-                   command=self._action_export).pack(side="left", padx=2)
-
-    def _build_canvas(self) -> None:
-        """Create the canvas with vertical and horizontal scrollbars."""
-        wrapper = ttk.Frame(self.parent_frame)
-        wrapper.pack(fill="both", expand=True, padx=4, pady=4)
-
-        self.canvas = tk.Canvas(
-            wrapper, bg="#1a1a2e", highlightthickness=0,
-        )
-
-        v_scroll = ttk.Scrollbar(wrapper, orient="vertical",
-                                 command=self.canvas.yview)
-        h_scroll = ttk.Scrollbar(wrapper, orient="horizontal",
-                                 command=self.canvas.xview)
-        self.canvas.configure(yscrollcommand=v_scroll.set,
-                              xscrollcommand=h_scroll.set)
-
-        v_scroll.pack(side="right", fill="y")
-        h_scroll.pack(side="bottom", fill="x")
-        self.canvas.pack(side="left", fill="both", expand=True)
-
-    def _create_tooltip_window(self) -> None:
-        """Create the floating tooltip label (hidden initially)."""
-        self.tooltip = tk.Label(
-            self.canvas, text="", bg=_TOOLTIP_BG, fg=_TOOLTIP_FG,
-            font=_TOOLTIP_FONT, padx=6, pady=3, relief="solid",
-            borderwidth=1, justify="left",
-        )
-        # The tooltip is placed via canvas window — not packed.
-
-    # ------------------------------------------------------------------ #
-    #  Layout helpers
-    # ------------------------------------------------------------------ #
-
-    def _calculate_layout(self) -> None:
+    def _calculate_layout(self):
         """
-        Recalculate ``blocks_per_row`` based on the current canvas width
-        and ``block_size_pixels``.
+        Recalculate ``blocks_per_row`` and ``total_rows`` based on
+        the current canvas width and ``block_size_pixels``.
         """
-        self.canvas.update_idletasks()
-        canvas_width = max(self.canvas.winfo_width(), 200)
-        self.blocks_per_row = max(1, canvas_width // self.block_size_pixels)
+        cw = self.canvas.winfo_width()
+        if cw < 10:
+            cw = 600  # sensible fallback before the canvas is mapped
+        self.blocks_per_row = max(1, cw // self.block_size_pixels)
+        self.total_rows = math.ceil(
+            self.disk.total_blocks / self.blocks_per_row)
 
-    @property
-    def total_rows(self) -> int:
-        """Total number of rows needed to display all blocks."""
-        return math.ceil(self.disk.total_blocks / max(1, self.blocks_per_row))
+    # --------------------------------------------------------------------- #
+    #  Main draw
+    # --------------------------------------------------------------------- #
 
-    # ------------------------------------------------------------------ #
-    #  Drawing
-    # ------------------------------------------------------------------ #
-
-    def draw_disk(self) -> None:
+    def draw_disk(self):
         """
-        Clear the canvas and redraw the full block grid, legend, and
-        statistics.
+        Clear the canvas and redraw every block as a coloured rectangle,
+        then append the legend and update the statistics label.
         """
         self.canvas.delete("all")
         self._calculate_layout()
 
-        bs = self.block_size_pixels
+        bp = self.block_size_pixels
         total = self.disk.total_blocks
 
         block_num = 0
@@ -236,453 +225,101 @@ class DiskVisualizer:
                 if block_num >= total:
                     break
 
-                x = col * bs
-                y = row * bs
+                x1 = col * bp
+                y1 = row * bp
+                x2 = x1 + bp
+                y2 = y1 + bp
 
-                color = self._get_block_color(block_num)
+                colour = self._get_block_color(block_num)
 
                 self.canvas.create_rectangle(
-                    x, y,
-                    x + bs, y + bs,
-                    fill=color,
+                    x1, y1, x2, y2,
+                    fill=colour,
                     outline=self.color_scheme["outline"],
-                    tags=f"block_{block_num}",
+                    tags=(f"block_{block_num}", "block"),
                 )
                 block_num += 1
 
-        # Update scroll region to encompass the grid + legend
-        grid_height = self.total_rows * bs
-        total_height = grid_height + _LEGEND_HEIGHT + 10
-        total_width = self.blocks_per_row * bs
-        self.canvas.configure(
-            scrollregion=(0, 0, total_width, total_height)
-        )
-
+        # Legend below the grid
         self.add_legend()
 
-    def update_display(self) -> None:
-        """Refresh the visualization by redrawing the disk grid."""
-        self._highlighted_inode = None
+        # Scroll region
+        self.canvas.configure(
+            scrollregion=self.canvas.bbox("all") or (0, 0, 600, 400))
+
+        # Stats in toolbar
+        self._update_stats_label()
+
+    # --------------------------------------------------------------------- #
+    #  Refresh alias
+    # --------------------------------------------------------------------- #
+
+    def update_display(self):
+        """Refresh the visualisation by redrawing the entire disk."""
         self.draw_disk()
 
-    # ------------------------------------------------------------------ #
-    #  Block color logic
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
+    #  Block colour
+    # --------------------------------------------------------------------- #
 
     def _get_block_color(self, block_num: int) -> str:
         """
-        Determine the display colour for a specific block.
+        Return the hex colour for *block_num* according to its state.
 
         Priority order:
-        1. Highlighted inode  → orange
-        2. Corrupt data       → red
-        3. System block (< 2) → light blue
-        4. Allocated & fragmented → yellow
-        5. Allocated          → coral
-        6. Free               → green
-
-        Args:
-            block_num: Zero-based block index.
-
-        Returns:
-            Hex colour string.
+        1. Highlighted file → orange
+        2. Heat-map mode → gradient
+        3. System block (block 0) → blue
+        4. Allocated (owner in FAT) → file-hue or red
+        5. Allocated bitmap but no FAT owner → yellow (fragmented / orphan)
+        6. Free → green
         """
-        # 1) File-highlight overlay
+        cs = self.color_scheme
+
+        # 1. Highlighted inode
         if self._highlighted_inode is not None:
-            blocks = self.fat.file_to_blocks.get(self._highlighted_inode, [])
-            if block_num in blocks:
-                return self.color_scheme["highlight"]
-
-        # 2) Corruption check
-        data = self.disk.blocks[block_num]
-        if isinstance(data, bytes) and (
-                b"CORRUPTED" in data or b"BAD_SECTOR" in data):
-            return self.color_scheme["corrupt"]
-
-        # 3) System block (first 2 blocks reserved)
-        if block_num < 2:
-            return self.color_scheme["system"]
-
-        # 4/5) Allocated
-        is_allocated = self.fsm.bitmap[block_num] == 1
-        if is_allocated:
             owner = self.fat.block_to_file.get(block_num)
-            if owner is not None and self.fat.is_fragmented(owner):
-                return self.color_scheme["fragmented"]
-            return self.color_scheme["allocated"]
+            if owner == self._highlighted_inode:
+                return cs["highlight"]
 
-        # 6) Free
-        return self.color_scheme["free"]
+        # 2. Heat-map mode
+        if self._heatmap_mode:
+            return self._heatmap_color(block_num)
 
-    # ------------------------------------------------------------------ #
-    #  Mouse events
-    # ------------------------------------------------------------------ #
+        # 3. System block (first block)
+        if block_num == 0:
+            return cs["system"]
 
-    def on_mouse_move(self, event: tk.Event) -> None:
-        """
-        Handle mouse hover — show a tooltip with block info if the cursor
-        is over a block.
-        """
-        block_num = self._get_block_at_position(
-            self.canvas.canvasx(event.x),
-            self.canvas.canvasy(event.y),
-        )
-        if block_num is None:
-            self._hide_tooltip()
-            return
-        self._show_tooltip(block_num, event.x, event.y)
-
-    def on_click(self, event: tk.Event) -> None:
-        """
-        Handle click — open a detail dialog for the block under the
-        cursor.
-        """
-        block_num = self._get_block_at_position(
-            self.canvas.canvasx(event.x),
-            self.canvas.canvasy(event.y),
-        )
-        if block_num is None:
-            return
-
-        # Gather information
-        status = "Allocated" if self.fsm.bitmap[block_num] == 1 else "Free"
+        # 4–6. Normal mode
         owner = self.fat.block_to_file.get(block_num)
-        owner_str = f"Inode #{owner}" if owner is not None else "None"
-
-        data = self.disk.blocks[block_num]
-        if data is not None:
-            preview = data[:64].decode("utf-8", errors="replace")
-            data_len = len(data)
-        else:
-            preview = "<empty>"
-            data_len = 0
-
-        # Build detail text
-        detail = (
-            f"Block #{block_num}\n"
-            f"{'─' * 30}\n"
-            f"Status:        {status}\n"
-            f"Owner:         {owner_str}\n"
-            f"Data size:     {data_len} bytes\n"
-            f"Data preview:  {preview}\n"
-        )
-
-        # If allocated, check fragmentation
         if owner is not None:
-            frag = self.fat.is_fragmented(owner)
-            blocks = self.fat.file_to_blocks.get(owner, [])
-            detail += (
-                f"\n{'─' * 30}\n"
-                f"File blocks:   {blocks}\n"
-                f"Fragmented:    {'Yes' if frag else 'No'}\n"
-            )
+            # Cycle through a palette per file inode
+            file_colours = [
+                "#89b4fa", "#a6e3a1", "#f9e2af",
+                "#f38ba8", "#cba6f7", "#fab387",
+                "#94e2d5", "#f2cdcd", "#74c7ec",
+            ]
+            return file_colours[owner % len(file_colours)]
 
-        messagebox.showinfo(f"Block #{block_num} Details", detail)
+        if self.fsm.bitmap[block_num] == 1:
+            return cs["fragmented"]   # allocated but unowned — suspicious
 
-    # ------------------------------------------------------------------ #
-    #  Position helpers
-    # ------------------------------------------------------------------ #
+        return cs["free"]
 
-    def _get_block_at_position(self, x: float, y: float) -> Optional[int]:
+    # --------------------------------------------------------------------- #
+    #  Heat-map helper
+    # --------------------------------------------------------------------- #
+
+    def _heatmap_color(self, block_num: int) -> str:
         """
-        Calculate the block number from canvas coordinates.
+        Return a heat-map gradient colour for *block_num*.
 
-        Args:
-            x: Horizontal canvas coordinate (float from canvasx).
-            y: Vertical canvas coordinate (float from canvasy).
-
-        Returns:
-            The block number or ``None`` if the position is outside
-            the grid.
+        Measures local fragmentation in a neighbourhood of ±8 blocks:
+        more transitions → hotter (red), fewer → cooler (green).
         """
-        bs = self.block_size_pixels
-        col = int(x) // bs
-        row = int(y) // bs
-
-        if col < 0 or col >= self.blocks_per_row:
-            return None
-        if row < 0 or row >= self.total_rows:
-            return None
-
-        block_num = row * self.blocks_per_row + col
-        if block_num >= self.disk.total_blocks:
-            return None
-        return block_num
-
-    # ------------------------------------------------------------------ #
-    #  Tooltip
-    # ------------------------------------------------------------------ #
-
-    def _show_tooltip(self, block_num: int, x: int, y: int) -> None:
-        """
-        Display a tooltip near the cursor with block information.
-
-        Args:
-            block_num: Block index.
-            x: Widget-relative x coordinate.
-            y: Widget-relative y coordinate.
-        """
-        status = "Allocated" if self.fsm.bitmap[block_num] == 1 else "Free"
-        owner = self.fat.block_to_file.get(block_num)
-        owner_str = f"Inode #{owner}" if owner is not None else "—"
-
-        text = (
-            f"Block #{block_num}\n"
-            f"Status: {status}\n"
-            f"Owner:  {owner_str}"
-        )
-
-        self.tooltip.configure(text=text)
-
-        # Place tooltip slightly offset from cursor (using canvas window)
-        cx = self.canvas.canvasx(x) + 14
-        cy = self.canvas.canvasy(y) + 14
-        self.canvas.delete("tooltip_win")
-        self.canvas.create_window(
-            cx, cy, window=self.tooltip, anchor="nw", tags="tooltip_win"
-        )
-
-    def _hide_tooltip(self) -> None:
-        """Hide the tooltip."""
-        self.canvas.delete("tooltip_win")
-
-    # ------------------------------------------------------------------ #
-    #  File-block highlighting
-    # ------------------------------------------------------------------ #
-
-    def highlight_file_blocks(self, inode_number: int) -> None:
-        """
-        Highlight blocks belonging to a specific file with orange
-        to visually show file fragmentation.
-
-        Args:
-            inode_number: The inode whose blocks should be highlighted.
-        """
-        self._highlighted_inode = inode_number
-        self.draw_disk()
-
-    def clear_highlights(self) -> None:
-        """Remove all file-block highlights and return to normal view."""
-        self._highlighted_inode = None
-        self.draw_disk()
-
-    # ------------------------------------------------------------------ #
-    #  Legend and statistics
-    # ------------------------------------------------------------------ #
-
-    def add_legend(self) -> None:
-        """
-        Draw a legend and statistics summary below the block grid.
-        """
-        bs = self.block_size_pixels
-        y_start = self.total_rows * bs + 10
-
-        # ---- Color legend squares ----
-        legend_items = [
-            ("Free",       self.color_scheme["free"]),
-            ("Allocated",  self.color_scheme["allocated"]),
-            ("System",     self.color_scheme["system"]),
-            ("Fragmented", self.color_scheme["fragmented"]),
-            ("Corrupt",    self.color_scheme["corrupt"]),
-            ("Highlight",  self.color_scheme["highlight"]),
-        ]
-
-        x = 10
-        for label, color in legend_items:
-            self.canvas.create_rectangle(
-                x, y_start, x + 14, y_start + 14,
-                fill=color, outline="#888",
-            )
-            self.canvas.create_text(
-                x + 18, y_start + 7, text=label,
-                fill="#e0e0e0", font=("Segoe UI", 8), anchor="w",
-            )
-            x += len(label) * 7 + 36
-
-        # ---- Statistics ----
-        total = self.disk.total_blocks
-        free = self.fsm.get_free_count()
-        allocated = self.fsm.get_allocated_count()
-        frag_pct = self.fsm.get_fragmentation_percentage()
-
-        stats_text = (
-            f"Total: {total}  |  "
-            f"Free: {free}  |  "
-            f"Allocated: {allocated}  |  "
-            f"Fragmentation: {frag_pct:.1f}%"
-        )
-        self.canvas.create_text(
-            10, y_start + 28, text=stats_text,
-            fill="#a0a0b0", font=("Segoe UI", 9), anchor="w",
-        )
-
-    # ------------------------------------------------------------------ #
-    #  Zoom
-    # ------------------------------------------------------------------ #
-
-    def zoom_in(self) -> None:
-        """Increase block size and redraw with larger blocks."""
-        if self.block_size_pixels < _MAX_BLOCK_SIZE_PX:
-            self.block_size_pixels = min(
-                self.block_size_pixels + 4, _MAX_BLOCK_SIZE_PX
-            )
-            self.draw_disk()
-
-    def zoom_out(self) -> None:
-        """Decrease block size and redraw with smaller blocks."""
-        if self.block_size_pixels > _MIN_BLOCK_SIZE_PX:
-            self.block_size_pixels = max(
-                self.block_size_pixels - 4, _MIN_BLOCK_SIZE_PX
-            )
-            self.draw_disk()
-
-    # ------------------------------------------------------------------ #
-    #  Export
-    # ------------------------------------------------------------------ #
-
-    def export_visualization(self, filepath: str) -> None:
-        """
-        Export the current canvas visualization as a PNG image.
-
-        Uses Pillow (PIL) to capture the canvas contents.  If Pillow
-        is not installed, saves as a PostScript file instead.
-
-        Args:
-            filepath: Destination file path (should end in ``.png``).
-        """
-        try:
-            # Generate PostScript from canvas
-            ps_path = filepath.replace(".png", ".ps")
-            self.canvas.postscript(file=ps_path, colormode="color")
-
-            try:
-                from PIL import Image
-                img = Image.open(ps_path)
-                img.save(filepath, "PNG")
-                import os
-                os.remove(ps_path)
-                logger.info("Exported visualization as PNG to %s", filepath)
-            except ImportError:
-                logger.warning(
-                    "Pillow not installed — saved as PostScript: %s", ps_path
-                )
-                messagebox.showinfo(
-                    "Export",
-                    f"Pillow not installed.\n"
-                    f"Saved as PostScript:\n{ps_path}"
-                )
-                return
-
-            messagebox.showinfo("Export", f"Saved to:\n{filepath}")
-
-        except Exception as exc:
-            logger.error("Export failed: %s", exc)
-            messagebox.showerror("Export Error", str(exc))
-
-    def _action_export(self) -> None:
-        """Prompt the user for a file path and export."""
-        from tkinter import filedialog
-        path = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")],
-        )
-        if path:
-            self.export_visualization(path)
-
-    # ------------------------------------------------------------------ #
-    #  Fragmentation heatmap
-    # ------------------------------------------------------------------ #
-
-    def show_fragmentation_heatmap(self) -> None:
-        """
-        Show an alternative visualization using a colour gradient
-        based on local fragmentation density.
-
-        - **Green**: Area is contiguous (low fragmentation).
-        - **Yellow**: Moderate fragmentation.
-        - **Red**: Highly fragmented area.
-
-        The "heat" for each block is computed as the ratio of
-        state-transitions in its local neighbourhood (±``window``
-        blocks).
-        """
-        self.canvas.delete("all")
-        self._calculate_layout()
-
-        bs = self.block_size_pixels
-        total = self.disk.total_blocks
-        window = 8  # neighbourhood half-width
-
-        block_num = 0
-        for row in range(self.total_rows):
-            for col in range(self.blocks_per_row):
-                if block_num >= total:
-                    break
-
-                x = col * bs
-                y = row * bs
-
-                # Calculate local fragmentation heat
-                heat = self._local_fragmentation(block_num, window)
-                color = self._heat_to_color(heat)
-
-                self.canvas.create_rectangle(
-                    x, y, x + bs, y + bs,
-                    fill=color,
-                    outline=self.color_scheme["outline"],
-                    tags=f"block_{block_num}",
-                )
-                block_num += 1
-
-        # Legend
-        grid_height = self.total_rows * bs
-        y_top = grid_height + 10
-        self.canvas.create_text(
-            10, y_top, text="Heatmap:  ",
-            fill="#e0e0e0", font=("Segoe UI", 9, "bold"), anchor="w",
-        )
-
-        # Gradient bar
-        bar_x = 80
-        bar_width = 200
-        for i in range(bar_width):
-            h = i / bar_width
-            c = self._heat_to_color(h)
-            self.canvas.create_line(
-                bar_x + i, y_top - 4, bar_x + i, y_top + 10, fill=c,
-            )
-        self.canvas.create_text(
-            bar_x - 4, y_top + 3, text="Low", fill="#90EE90",
-            font=("Segoe UI", 8), anchor="e",
-        )
-        self.canvas.create_text(
-            bar_x + bar_width + 4, y_top + 3, text="High", fill="#FF4444",
-            font=("Segoe UI", 8), anchor="w",
-        )
-
-        # Update scroll region
-        total_height = grid_height + _LEGEND_HEIGHT + 10
-        total_width = self.blocks_per_row * bs
-        self.canvas.configure(
-            scrollregion=(0, 0, total_width, total_height)
-        )
-
-    def _local_fragmentation(self, block_num: int, window: int) -> float:
-        """
-        Compute a 0.0–1.0 fragmentation score for the neighbourhood
-        around ``block_num``.
-
-        Args:
-            block_num: Centre block.
-            window: Half-width of the neighbourhood.
-
-        Returns:
-            float between 0.0 (contiguous) and 1.0 (highly fragmented).
-        """
-        lo = max(0, block_num - window)
-        hi = min(self.disk.total_blocks - 1, block_num + window)
-        if hi <= lo:
-            return 0.0
+        radius = 8
+        lo = max(0, block_num - radius)
+        hi = min(self.disk.total_blocks - 1, block_num + radius)
 
         transitions = 0
         for i in range(lo, hi):
@@ -690,105 +327,426 @@ class DiskVisualizer:
                 transitions += 1
 
         span = hi - lo
-        return min(1.0, transitions / max(1, span))
-
-    @staticmethod
-    def _heat_to_color(heat: float) -> str:
-        """
-        Map a heat value (0.0–1.0) to a colour on a green→yellow→red
-        gradient.
-
-        Args:
-            heat: Normalised fragmentation intensity.
-
-        Returns:
-            Hex colour string.
-        """
-        # Green (0.0) → Yellow (0.5) → Red (1.0)
-        heat = max(0.0, min(1.0, heat))
-        if heat < 0.5:
-            r = int(255 * (heat * 2))
-            g = 255
+        if span == 0:
+            ratio = 0.0
         else:
-            r = 255
-            g = int(255 * (1 - (heat - 0.5) * 2))
-        b = 0
+            ratio = min(1.0, transitions / (span * 0.5))
+
+        # Lerp green → yellow → red
+        if ratio < 0.5:
+            t = ratio * 2
+            r = int(166 + (249 - 166) * t)
+            g = int(227 + (226 - 227) * t)
+            b = int(161 + (175 - 161) * t)
+        else:
+            t = (ratio - 0.5) * 2
+            r = int(249 + (243 - 249) * t)
+            g = int(226 + (139 - 226) * t)
+            b = int(175 + (168 - 175) * t)
+
         return f"#{r:02x}{g:02x}{b:02x}"
 
-    # ------------------------------------------------------------------ #
-    #  Animated operations
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
+    #  Mouse hover
+    # --------------------------------------------------------------------- #
+
+    def on_mouse_move(self, event):
+        """Show a tooltip with block info when hovering over the grid."""
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        block = self._get_block_at_position(cx, cy)
+        if block is not None:
+            self._show_tooltip(block, event.x_root, event.y_root)
+        else:
+            self._hide_tooltip()
+
+    # --------------------------------------------------------------------- #
+    #  Mouse click
+    # --------------------------------------------------------------------- #
+
+    def on_click(self, event):
+        """Show a detailed dialog for the block under the cursor."""
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        block = self._get_block_at_position(cx, cy)
+        if block is None:
+            return
+
+        owner = self.fat.block_to_file.get(block)
+        is_free = self.fsm.bitmap[block] == 0
+
+        lines = [
+            f"Block number:   {block}",
+            f"Status:         {'Free' if is_free else 'Allocated'}",
+        ]
+
+        if owner is not None:
+            lines.append(f"Owner inode:    {owner}")
+
+            # Resolve file name via directory tree
+            fname = self._resolve_inode_name(owner)
+            if fname:
+                lines.append(f"File:           {fname}")
+
+            blocks = self.fat.get_file_blocks(owner)
+            if blocks:
+                idx = blocks.index(block) if block in blocks else -1
+                lines.append(
+                    f"Position:       block {idx + 1} of {len(blocks)}"
+                    f" in file")
+
+            # Data preview
+            try:
+                raw = self.disk.read_block(block)
+                preview = raw[:64].rstrip(b"\x00")
+                if preview:
+                    text = preview.decode("utf-8", errors="replace")
+                    lines.append(f"\nData preview:\n{text}")
+            except Exception:
+                pass
+
+        root_w = self.parent_frame.winfo_toplevel()
+        messagebox.showinfo(f"Block {block}", "\n".join(lines),
+                            parent=root_w)
+
+    # --------------------------------------------------------------------- #
+    #  Block-at-position
+    # --------------------------------------------------------------------- #
+
+    def _get_block_at_position(self, x: float, y: float) -> Optional[int]:
+        """
+        Return the block number at canvas coordinates *(x, y)*,
+        or ``None`` if the point is outside the grid.
+        """
+        bp = self.block_size_pixels
+        col = int(x) // bp
+        row = int(y) // bp
+
+        if col < 0 or col >= self.blocks_per_row:
+            return None
+        if row < 0 or row >= self.total_rows:
+            return None
+
+        block = row * self.blocks_per_row + col
+        if block >= self.disk.total_blocks:
+            return None
+        return block
+
+    # --------------------------------------------------------------------- #
+    #  Tooltip
+    # --------------------------------------------------------------------- #
+
+    def _create_tooltip_window(self):
+        """Create the floating tooltip ``Toplevel`` (hidden by default)."""
+        self.tooltip = tk.Toplevel(self.parent_frame)
+        self.tooltip.wm_overrideredirect(True)
+        self.tooltip.withdraw()
+
+        self._tip_label = tk.Label(
+            self.tooltip, justify=tk.LEFT,
+            background=self.color_scheme["legend_bg"],
+            foreground=self.color_scheme["legend_fg"],
+            relief=tk.SOLID, borderwidth=1,
+            font=("Consolas", 9), padx=6, pady=4,
+        )
+        self._tip_label.pack()
+
+    def _show_tooltip(self, block_num: int, x_root: int, y_root: int):
+        """Display the tooltip near the cursor with block information."""
+        owner = self.fat.block_to_file.get(block_num)
+        is_free = self.fsm.bitmap[block_num] == 0
+
+        parts = [f"Block {block_num}"]
+        parts.append("Free" if is_free else "Allocated")
+
+        if owner is not None:
+            parts.append(f"Inode {owner}")
+            fname = self._resolve_inode_name(owner)
+            if fname:
+                parts.append(fname)
+
+        self._tip_label.configure(text="  |  ".join(parts))
+        self.tooltip.wm_geometry(f"+{x_root + 16}+{y_root + 12}")
+        self.tooltip.deiconify()
+        self.tooltip.lift()
+
+    def _hide_tooltip(self):
+        """Hide the tooltip window."""
+        if self.tooltip:
+            self.tooltip.withdraw()
+
+    # --------------------------------------------------------------------- #
+    #  Highlighting
+    # --------------------------------------------------------------------- #
+
+    def highlight_file_blocks(self, inode_number: int):
+        """
+        Highlight every block belonging to *inode_number* in orange
+        and redraw the canvas.
+        """
+        self._highlighted_inode = inode_number
+        self._heatmap_mode = False
+        self.draw_disk()
+
+    def clear_highlights(self):
+        """Remove file-block highlights and redraw normally."""
+        self._highlighted_inode = None
+        self.draw_disk()
+
+    # --------------------------------------------------------------------- #
+    #  Legend
+    # --------------------------------------------------------------------- #
+
+    def add_legend(self):
+        """
+        Draw a colour-keyed legend and statistics summary below
+        the block grid on the canvas.
+        """
+        bp = self.block_size_pixels
+        y_start = self.total_rows * bp + self._LEGEND_PAD + 4
+        x = self._LEGEND_PAD
+        sw = self._LEGEND_SWATCH
+        cs = self.color_scheme
+        fg = cs["legend_fg"]
+
+        entries = [
+            (cs["free"],       "Free"),
+            (cs["allocated"],  "Allocated"),
+            (cs["system"],     "System"),
+            (cs["fragmented"], "Fragmented / Orphan"),
+            (cs["highlight"],  "Highlighted"),
+        ]
+
+        for colour, label in entries:
+            self.canvas.create_rectangle(
+                x, y_start, x + sw, y_start + sw,
+                fill=colour, outline=cs["outline"], tags="legend")
+            self.canvas.create_text(
+                x + sw + 6, y_start + sw // 2,
+                text=label, anchor=tk.W, fill=fg,
+                font=("Segoe UI", 8), tags="legend")
+            x += sw + len(label) * 7 + 24
+
+        # ---- stats line ----
+        y_stats = y_start + sw + 10
+        total = self.disk.total_blocks
+        free_c = self.fsm.get_free_count()
+        alloc_c = self.fsm.get_allocated_count()
+        frag = self.fsm.get_fragmentation_percentage()
+
+        stats_text = (
+            f"Total: {total}   "
+            f"Free: {free_c}   "
+            f"Allocated: {alloc_c}   "
+            f"Fragmentation: {frag:.1f}%"
+        )
+        self.canvas.create_text(
+            self._LEGEND_PAD, y_stats,
+            text=stats_text, anchor=tk.W, fill=fg,
+            font=("Consolas", 9), tags="legend")
+
+    # --------------------------------------------------------------------- #
+    #  Zoom
+    # --------------------------------------------------------------------- #
+
+    def zoom_in(self):
+        """Increase block square size and redraw."""
+        if self.block_size_pixels < self._MAX_BLOCK_PX:
+            self.block_size_pixels = min(
+                self._MAX_BLOCK_PX,
+                self.block_size_pixels + self._ZOOM_STEP)
+            self.draw_disk()
+
+    def zoom_out(self):
+        """Decrease block square size and redraw."""
+        if self.block_size_pixels > self._MIN_BLOCK_PX:
+            self.block_size_pixels = max(
+                self._MIN_BLOCK_PX,
+                self.block_size_pixels - self._ZOOM_STEP)
+            self.draw_disk()
+
+    # --------------------------------------------------------------------- #
+    #  Export
+    # --------------------------------------------------------------------- #
+
+    def export_visualization(self, filepath: str):
+        """
+        Export the current canvas contents to a PNG file.
+
+        Requires Pillow (``pip install Pillow``).  If Pillow is not
+        installed a warning dialog is shown instead.
+
+        Parameters
+        ----------
+        filepath : str
+            Destination file path (should end with ``.png``).
+        """
+        if not _HAS_PIL:
+            messagebox.showwarning(
+                "Export",
+                "Pillow is required for PNG export.\n"
+                "Install with:  pip install Pillow",
+                parent=self.parent_frame.winfo_toplevel())
+            return
+
+        try:
+            self._calculate_layout()
+            bp = self.block_size_pixels
+            img_w = self.blocks_per_row * bp
+            img_h = self.total_rows * bp + 60  # extra for legend
+
+            img = Image.new("RGB", (img_w, img_h),
+                            color=self.color_scheme["canvas_bg"])
+            draw = ImageDraw.Draw(img)
+
+            block_num = 0
+            for row in range(self.total_rows):
+                for col in range(self.blocks_per_row):
+                    if block_num >= self.disk.total_blocks:
+                        break
+                    x1 = col * bp
+                    y1 = row * bp
+                    colour = self._get_block_color(block_num)
+                    draw.rectangle([x1, y1, x1 + bp - 1, y1 + bp - 1],
+                                   fill=colour,
+                                   outline=self.color_scheme["outline"])
+                    block_num += 1
+
+            img.save(filepath, "PNG")
+            logger.info("Disk visualisation exported to %s", filepath)
+            messagebox.showinfo(
+                "Export", f"Visualisation saved to:\n{filepath}",
+                parent=self.parent_frame.winfo_toplevel())
+        except Exception as exc:
+            logger.exception("Export failed")
+            messagebox.showerror("Export Error", str(exc),
+                                 parent=self.parent_frame.winfo_toplevel())
+
+    # --------------------------------------------------------------------- #
+    #  Fragmentation heat-map
+    # --------------------------------------------------------------------- #
+
+    def show_fragmentation_heatmap(self):
+        """
+        Toggle heat-map mode where block colour reflects local
+        fragmentation intensity (green → yellow → red).
+        """
+        self._heatmap_mode = not self._heatmap_mode
+        self._highlighted_inode = None
+        self.draw_disk()
+
+    # --------------------------------------------------------------------- #
+    #  Animation
+    # --------------------------------------------------------------------- #
 
     def animate_operation(self, blocks: List[int],
-                          operation: str = "allocate") -> None:
+                          operation: str = "allocate"):
         """
-        Animate block allocation or deallocation by smoothly
-        transitioning colours over several frames.
+        Animate an allocation or deallocation by flashing the
+        specified blocks through a transition sequence.
 
-        Args:
-            blocks: Block numbers to animate.
-            operation: ``'allocate'`` to transition free→allocated, or
-                ``'deallocate'`` for allocated→free.
+        Parameters
+        ----------
+        blocks : list[int]
+            Block numbers to animate.
+        operation : str
+            ``'allocate'`` or ``'deallocate'``.
         """
         if not blocks:
             return
 
         if operation == "allocate":
-            start_color = self.color_scheme["free"]
-            end_color = self.color_scheme["allocated"]
+            colour_seq = [
+                self.color_scheme["canvas_bg"],
+                self.color_scheme["highlight"],
+                "#ffffff",
+                self.color_scheme["highlight"],
+                self.color_scheme["allocated"],
+            ]
         else:
-            start_color = self.color_scheme["allocated"]
-            end_color = self.color_scheme["free"]
+            colour_seq = [
+                self.color_scheme["allocated"],
+                self.color_scheme["highlight"],
+                "#ffffff",
+                self.color_scheme["highlight"],
+                self.color_scheme["free"],
+            ]
 
-        # Parse start/end RGB
-        sr, sg, sb = self._hex_to_rgb(start_color)
-        er, eg, eb = self._hex_to_rgb(end_color)
-
-        self._animate_step(blocks, sr, sg, sb, er, eg, eb, step=0)
+        self._animate_step(blocks, colour_seq, 0)
 
     def _animate_step(self, blocks: List[int],
-                      sr: int, sg: int, sb: int,
-                      er: int, eg: int, eb: int,
-                      step: int) -> None:
-        """Perform one animation frame and schedule the next."""
-        if step > _ANIM_TOTAL_STEPS:
-            # Final redraw to ensure clean state
-            self.draw_disk()
+                      colour_seq: List[str], step: int):
+        """Execute one animation frame and schedule the next."""
+        if step >= len(colour_seq):
+            self.draw_disk()  # final redraw in correct state
             return
 
-        t = step / _ANIM_TOTAL_STEPS
-        r = int(sr + (er - sr) * t)
-        g = int(sg + (eg - sg) * t)
-        b = int(sb + (eb - sb) * t)
-        color = f"#{r:02x}{g:02x}{b:02x}"
+        colour = colour_seq[step]
+        bp = self.block_size_pixels
 
-        for bn in blocks:
-            tag = f"block_{bn}"
-            self.canvas.itemconfigure(tag, fill=color)
+        for b in blocks:
+            if b >= self.disk.total_blocks:
+                continue
+            row = b // self.blocks_per_row
+            col = b % self.blocks_per_row
+            x1 = col * bp
+            y1 = row * bp
+
+            tag = f"block_{b}"
+            self.canvas.delete(tag)
+            self.canvas.create_rectangle(
+                x1, y1, x1 + bp, y1 + bp,
+                fill=colour,
+                outline=self.color_scheme["outline"],
+                tags=(tag, "block"),
+            )
 
         self._anim_after_id = self.canvas.after(
-            _ANIM_STEP_MS,
-            self._animate_step, blocks,
-            sr, sg, sb, er, eg, eb, step + 1,
-        )
+            120, self._animate_step, blocks, colour_seq, step + 1)
 
-    @staticmethod
-    def _hex_to_rgb(hex_color: str):
-        """Convert ``'#RRGGBB'`` to ``(R, G, B)`` ints."""
-        hex_color = hex_color.lstrip("#")
-        return (
-            int(hex_color[0:2], 16),
-            int(hex_color[2:4], 16),
-            int(hex_color[4:6], 16),
-        )
+    # --------------------------------------------------------------------- #
+    #  Canvas resize handler
+    # --------------------------------------------------------------------- #
 
-    # ------------------------------------------------------------------ #
-    #  Resize handler
-    # ------------------------------------------------------------------ #
+    def _on_canvas_resize(self, _event):
+        """Redraw when the canvas is resized so the grid fills the width."""
+        self.draw_disk()
 
-    def _on_canvas_configure(self, event: tk.Event) -> None:
-        """Redraw when the canvas is resized."""
-        # Use after_cancel + after to debounce rapid resizes
-        if hasattr(self, "_resize_after_id"):
-            self.canvas.after_cancel(self._resize_after_id)
-        self._resize_after_id = self.canvas.after(200, self.draw_disk)
+    # --------------------------------------------------------------------- #
+    #  Reset
+    # --------------------------------------------------------------------- #
+
+    def _reset_view(self):
+        """Reset zoom, highlights, and heat-map to defaults."""
+        self.block_size_pixels = self._DEFAULT_BLOCK_PX
+        self._highlighted_inode = None
+        self._heatmap_mode = False
+        self.draw_disk()
+
+    # --------------------------------------------------------------------- #
+    #  Stats label
+    # --------------------------------------------------------------------- #
+
+    def _update_stats_label(self):
+        """Update the toolbar statistics string."""
+        total = self.disk.total_blocks
+        free_c = self.fsm.get_free_count()
+        frag = self.fsm.get_fragmentation_percentage()
+        self._stats_var.set(
+            f"Blocks: {total}   "
+            f"Free: {free_c}   "
+            f"Frag: {frag:.1f}%   "
+            f"Zoom: {self.block_size_pixels}px")
+
+    # --------------------------------------------------------------------- #
+    #  Inode → filename resolver
+    # --------------------------------------------------------------------- #
+
+    def _resolve_inode_name(self, inode_number: int) -> Optional[str]:
+        """Return the file path for *inode_number*, or ``None``."""
+        if self._dir_tree is None:
+            return None
+        node = self._dir_tree.inode_map.get(inode_number)
+        if node is None:
+            return None
+        return node.get_full_path()

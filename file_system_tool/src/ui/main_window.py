@@ -1,34 +1,32 @@
 """
-main_window.py - Main Tkinter GUI application for the File System Simulator.
+main_window.py — Main application window for the File System Recovery
+& Optimization Tool.
 
-Provides a comprehensive graphical interface for interacting with the
-simulated file system, including:
-  - Disk status and metrics dashboard
-  - File operations (create, delete, list)
-  - Crash injection and recovery
-  - Defragmentation controls
-  - Performance analysis and reporting
-  - Disk layout visualization
-  - Cache management
-  - Journal/transaction viewing
+Provides the Tkinter-based GUI with:
+  • Three-panel layout (directory tree, disk visualisation, performance)
+  • Bottom log console
+  • Full menu bar with keyboard shortcuts
+  • Integrated file-system component lifecycle
 
 Usage::
 
     from src.ui.main_window import MainWindow
-    app = MainWindow()
+    app = MainWindow(total_blocks=1024, block_size=512)
     app.run()
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from typing import Dict, Any
-import sys
-import os
-import threading
-import time
 import logging
+import os
+import sys
+import textwrap
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, simpledialog
+from typing import Dict, Any
 
-# Import all file system components
+# --------------------------------------------------------------------------- #
+#  File-system core components
+# --------------------------------------------------------------------------- #
 from src.core.disk import Disk
 from src.core.free_space import FreeSpaceManager
 from src.core.inode import Inode
@@ -36,1306 +34,1017 @@ from src.core.directory import DirectoryTree
 from src.core.file_allocation_table import FileAllocationTable
 from src.core.journal import Journal
 
+# --------------------------------------------------------------------------- #
+#  Recovery / optimisation components
+# --------------------------------------------------------------------------- #
 from src.recovery.crash_simulator import CrashSimulator
 from src.recovery.recovery_manager import RecoveryManager
 from src.recovery.defragmenter import Defragmenter
 from src.recovery.cache_manager import CacheManager
 from src.recovery.performance_analyzer import PerformanceAnalyzer
 
-from src.ui.disk_visualizer import DiskVisualizer
-from src.ui.performance_dashboard import PerformanceDashboard
-from src.ui.tree_view import TreeView
-
 logger = logging.getLogger(__name__)
 
 
-# ===================================================================== #
-#  Color Palette & Style Constants
-# ===================================================================== #
-
-COLORS = {
-    "bg_dark":         "#1a1a2e",
-    "bg_panel":        "#16213e",
-    "bg_card":         "#0f3460",
-    "accent_primary":  "#e94560",
-    "accent_green":    "#00d2a0",
-    "accent_yellow":   "#f5c542",
-    "accent_blue":     "#4fc3f7",
-    "accent_orange":   "#ff8c42",
-    "text_primary":    "#e0e0e0",
-    "text_secondary":  "#a0a0b0",
-    "text_header":     "#ffffff",
-    "border":          "#2a2a4a",
-    "success":         "#4caf50",
-    "warning":         "#ff9800",
-    "error":           "#f44336",
-    "free_block":      "#2e7d32",
-    "used_block":      "#1565c0",
-    "corrupt_block":   "#c62828",
-}
-
-FONT_HEADER  = ("Segoe UI", 14, "bold")
-FONT_SUBHEAD = ("Segoe UI", 11, "bold")
-FONT_BODY    = ("Segoe UI", 10)
-FONT_SMALL   = ("Segoe UI", 9)
-FONT_MONO    = ("Consolas", 10)
-FONT_MONO_SM = ("Consolas", 9)
-
-
-# ===================================================================== #
+# =========================================================================== #
 #  MainWindow
-# ===================================================================== #
+# =========================================================================== #
 
 class MainWindow:
     """
-    Main application window for the File System Simulator GUI.
+    Root application window for the File System Recovery & Optimization Tool.
 
-    Initializes all 10 core and recovery modules, provides tabbed
-    panels for disk status, file operations, crash/recovery workflows,
-    defragmentation, performance analytics, and cache management.
+    Attributes
+    ----------
+    root : tk.Tk
+        The top-level Tkinter window.
+    file_system_components : dict
+        All initialised file-system component instances, keyed by short name.
+    current_disk_path : str
+        Path to the currently loaded / saved disk image file.
+    theme : str
+        Active UI colour theme — ``'light'`` or ``'dark'``.
+    window_width : int
+        Window width in pixels (default 1400).
+    window_height : int
+        Window height in pixels (default 900).
     """
 
-    # ----------------------------------------------------------------- #
-    #  Initialization
-    # ----------------------------------------------------------------- #
+    # Default window geometry
+    _DEFAULT_WIDTH = 1400
+    _DEFAULT_HEIGHT = 900
 
-    def __init__(self, total_blocks: int = 1024, block_size: int = 512):
-        """
-        Create the main window and initialize file system components.
+    # --------------------------------------------------------------------- #
+    #  Construction
+    # --------------------------------------------------------------------- #
 
-        Args:
-            total_blocks: Number of blocks for the simulated disk.
-            block_size: Size of each block in bytes.
+    def __init__(self, total_blocks: int = 1000, block_size: int = 4096):
         """
+        Build and display the main application window.
+
+        Parameters
+        ----------
+        total_blocks : int
+            Number of blocks for the initial file system.
+        block_size : int
+            Size of each block in bytes.
+        """
+        self.window_width: int = self._DEFAULT_WIDTH
+        self.window_height: int = self._DEFAULT_HEIGHT
+        self.theme: str = "dark"
+        self.current_disk_path: str = ""
+        self._unsaved_changes: bool = False
+        self.inode_counter: int = 1
+
+        # File-system components — populated by _initialize_file_system
+        self.file_system_components: Dict[str, Any] = {}
+
         # ---- Tk root ----
         self.root = tk.Tk()
-        self.root.title("🗄️ File System Recovery & Optimization Tool")
-        self.root.geometry("1280x800")
-        self.root.minsize(1024, 680)
-        self.root.configure(bg=COLORS["bg_dark"])
+        self.root.title("File System Recovery & Optimization Tool")
+        self.root.geometry(f"{self.window_width}x{self.window_height}")
+        self.root.minsize(900, 600)
+        self._center_window()
 
-        # ---- Initialize file system components ----
-        self._init_file_system(total_blocks, block_size)
+        # Apply theme
+        self._apply_theme()
 
-        # ---- Internal state ----
-        self.inode_counter = 1  # auto-increment ID for new files
+        # Build UI skeleton
+        self._create_menu_bar()
+        self._initialize_file_system(total_blocks, block_size)
+        self._create_main_layout()
 
-        # ---- Build the UI ----
-        self._configure_styles()
-        self._build_menu_bar()
-        self._build_header()
-        self._build_notebook()
-        self._build_status_bar()
+        # Wire the close button to our handler
+        self.root.protocol("WM_DELETE_WINDOW", self.exit_application)
 
-        # ---- Populate initial data ----
-        self._refresh_dashboard()
+        # Start a periodic UI refresh
+        self._schedule_refresh()
 
-    # ----------------------------------------------------------------- #
-    #  File system bootstrap
-    # ----------------------------------------------------------------- #
+        logger.info("MainWindow created (%d×%d)", self.window_width, self.window_height)
 
-    def _init_file_system(self, total_blocks: int, block_size: int) -> None:
-        """Create and wire up all core + recovery modules."""
-        self.disk = Disk(total_blocks=total_blocks, block_size=block_size)
-        self.fsm  = FreeSpaceManager(total_blocks=total_blocks)
-        self.fat  = FileAllocationTable(allocation_method="indexed")
-        self.journal = Journal()
-        self.dir_tree = DirectoryTree()
+    # --------------------------------------------------------------------- #
+    #  Window helpers
+    # --------------------------------------------------------------------- #
 
-        self.fs_components: Dict[str, Any] = {
-            "disk":           self.disk,
-            "fsm":            self.fsm,
-            "fat":            self.fat,
-            "journal":        self.journal,
-            "directory_tree": self.dir_tree,
-        }
+    def _center_window(self):
+        """Position the window at the centre of the screen."""
+        self.root.update_idletasks()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = max(0, (sw - self.window_width) // 2)
+        y = max(0, (sh - self.window_height) // 2)
+        self.root.geometry(f"{self.window_width}x{self.window_height}+{x}+{y}")
 
-        self.cache = CacheManager(self.fs_components, cache_size=100, strategy="ARC")
-        self.fs_components["cache"] = self.cache
-
-        self.defrag       = Defragmenter(self.fs_components)
-        self.recovery_mgr = RecoveryManager(self.fs_components)
-        self.analyzer     = PerformanceAnalyzer(self.fs_components)
-        self.simulator    = CrashSimulator(random_seed=42)
-
-        logger.info("All file system components initialized for GUI.")
-
-    # ----------------------------------------------------------------- #
-    #  Styling
-    # ----------------------------------------------------------------- #
-
-    def _configure_styles(self) -> None:
-        """Apply a consistent dark-mode ttk theme."""
+    def _apply_theme(self):
+        """Configure ttk styles for the dark theme."""
         style = ttk.Style(self.root)
         style.theme_use("clam")
 
-        # General widget background
-        style.configure(".", background=COLORS["bg_dark"],
-                         foreground=COLORS["text_primary"],
-                         font=FONT_BODY)
+        bg = "#1e1e2e"
+        fg = "#cdd6f4"
+        accent = "#89b4fa"
+        surface = "#313244"
+        border = "#45475a"
+        red = "#f38ba8"
+        green = "#a6e3a1"
+        yellow = "#f9e2af"
 
-        # Notebook (tab bar)
-        style.configure("TNotebook", background=COLORS["bg_dark"],
-                         borderwidth=0)
-        style.configure("TNotebook.Tab",
-                         background=COLORS["bg_panel"],
-                         foreground=COLORS["text_secondary"],
-                         padding=[14, 6],
-                         font=FONT_SUBHEAD)
-        style.map("TNotebook.Tab",
-                   background=[("selected", COLORS["bg_card"])],
-                   foreground=[("selected", COLORS["accent_blue"])])
+        self.root.configure(bg=bg)
 
-        # Frame
-        style.configure("TFrame", background=COLORS["bg_dark"])
-        style.configure("Card.TFrame", background=COLORS["bg_panel"],
-                         relief="flat")
-
-        # Label
-        style.configure("TLabel", background=COLORS["bg_dark"],
-                         foreground=COLORS["text_primary"],
-                         font=FONT_BODY)
-        style.configure("Header.TLabel",
-                         background=COLORS["bg_dark"],
-                         foreground=COLORS["text_header"],
-                         font=FONT_HEADER)
-        style.configure("Metric.TLabel",
-                         background=COLORS["bg_panel"],
-                         foreground=COLORS["accent_blue"],
-                         font=("Segoe UI", 22, "bold"))
-        style.configure("MetricLabel.TLabel",
-                         background=COLORS["bg_panel"],
-                         foreground=COLORS["text_secondary"],
-                         font=FONT_SMALL)
-
-        # Button
-        style.configure("Accent.TButton",
-                         background=COLORS["accent_primary"],
-                         foreground="#ffffff",
-                         font=FONT_BODY,
-                         padding=[12, 6])
-        style.map("Accent.TButton",
-                   background=[("active", "#d63050")])
-
-        style.configure("Green.TButton",
-                         background=COLORS["accent_green"],
-                         foreground="#000000",
-                         font=FONT_BODY,
-                         padding=[12, 6])
-        style.map("Green.TButton",
-                   background=[("active", "#00b889")])
-
-        style.configure("Orange.TButton",
-                         background=COLORS["accent_orange"],
-                         foreground="#000000",
-                         font=FONT_BODY,
-                         padding=[12, 6])
-        style.map("Orange.TButton",
-                   background=[("active", "#e07830")])
-
-        # Treeview (table)
-        style.configure("Treeview",
-                         background=COLORS["bg_panel"],
-                         foreground=COLORS["text_primary"],
-                         fieldbackground=COLORS["bg_panel"],
-                         rowheight=26,
-                         font=FONT_SMALL)
-        style.configure("Treeview.Heading",
-                         background=COLORS["bg_card"],
-                         foreground=COLORS["accent_blue"],
-                         font=FONT_SUBHEAD)
+        style.configure(".", background=bg, foreground=fg,
+                         bordercolor=border, focuscolor=accent,
+                         fieldbackground=surface)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg)
+        style.configure("TButton", background=surface, foreground=fg,
+                         padding=(8, 4))
+        style.map("TButton",
+                   background=[("active", accent)],
+                   foreground=[("active", bg)])
+        style.configure("TLabelframe", background=bg, foreground=accent)
+        style.configure("TLabelframe.Label", background=bg, foreground=accent)
+        style.configure("Treeview", background=surface, foreground=fg,
+                         fieldbackground=surface, rowheight=22)
+        style.configure("Treeview.Heading", background=border, foreground=fg)
         style.map("Treeview",
-                   background=[("selected", COLORS["bg_card"])],
-                   foreground=[("selected", COLORS["text_header"])])
+                   background=[("selected", accent)],
+                   foreground=[("selected", bg)])
+        style.configure("TNotebook", background=bg)
+        style.configure("TNotebook.Tab", background=surface, foreground=fg,
+                         padding=(12, 4))
+        style.map("TNotebook.Tab",
+                   background=[("selected", accent)],
+                   foreground=[("selected", bg)])
+        style.configure("Horizontal.TProgressbar",
+                         troughcolor=surface, background=green)
+        style.configure("TEntry", fieldbackground=surface, foreground=fg,
+                         insertcolor=fg)
 
-        # LabelFrame
-        style.configure("TLabelframe",
-                         background=COLORS["bg_dark"],
-                         foreground=COLORS["accent_blue"],
-                         font=FONT_SUBHEAD)
-        style.configure("TLabelframe.Label",
-                         background=COLORS["bg_dark"],
-                         foreground=COLORS["accent_blue"],
-                         font=FONT_SUBHEAD)
+        # Store palette for manual widget colouring
+        self._palette = dict(bg=bg, fg=fg, accent=accent, surface=surface,
+                             border=border, red=red, green=green, yellow=yellow)
 
-        # Progressbar
-        style.configure("green.Horizontal.TProgressbar",
-                         troughcolor=COLORS["bg_panel"],
-                         background=COLORS["accent_green"])
-        style.configure("red.Horizontal.TProgressbar",
-                         troughcolor=COLORS["bg_panel"],
-                         background=COLORS["accent_primary"])
-
-    # ----------------------------------------------------------------- #
+    # --------------------------------------------------------------------- #
     #  Menu bar
-    # ----------------------------------------------------------------- #
+    # --------------------------------------------------------------------- #
 
-    def _build_menu_bar(self) -> None:
-        menubar = tk.Menu(self.root, bg=COLORS["bg_panel"],
-                          fg=COLORS["text_primary"],
-                          activebackground=COLORS["bg_card"],
-                          activeforeground=COLORS["text_header"])
+    def _create_menu_bar(self):
+        """Build the application menu bar with full keyboard shortcuts."""
+        menubar = tk.Menu(self.root, tearoff=0,
+                          bg=self._palette["surface"],
+                          fg=self._palette["fg"],
+                          activebackground=self._palette["accent"],
+                          activeforeground=self._palette["bg"])
 
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0,
-                            bg=COLORS["bg_panel"],
-                            fg=COLORS["text_primary"])
-        file_menu.add_command(label="Save Disk State…",
-                              command=self._action_save_disk)
-        file_menu.add_command(label="Load Disk State…",
-                              command=self._action_load_disk)
+        menu_kw = dict(tearoff=0,
+                       bg=self._palette["surface"],
+                       fg=self._palette["fg"],
+                       activebackground=self._palette["accent"],
+                       activeforeground=self._palette["bg"])
+
+        # ---- File ----
+        file_menu = tk.Menu(menubar, **menu_kw)
+        file_menu.add_command(label="New Disk…",     accelerator="Ctrl+N",
+                              command=self.new_disk)
+        file_menu.add_command(label="Open Disk…",    accelerator="Ctrl+O",
+                              command=self.open_disk)
         file_menu.add_separator()
-        file_menu.add_command(label="Export Performance Report…",
-                              command=self._action_export_report)
+        file_menu.add_command(label="Save",           accelerator="Ctrl+S",
+                              command=self.save_disk)
+        file_menu.add_command(label="Save As…",      accelerator="Ctrl+Shift+S",
+                              command=self.save_disk_as)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self._on_close)
+        file_menu.add_command(label="Exit",           accelerator="Alt+F4",
+                              command=self.exit_application)
         menubar.add_cascade(label="File", menu=file_menu)
 
-        # Tools menu
-        tools_menu = tk.Menu(menubar, tearoff=0,
-                             bg=COLORS["bg_panel"],
-                             fg=COLORS["text_primary"])
-        tools_menu.add_command(label="Format Disk",
-                               command=self._action_format_disk)
-        tools_menu.add_command(label="Run FSCK",
-                               command=self._action_run_fsck)
-        tools_menu.add_separator()
-        tools_menu.add_command(label="Reset File System",
-                               command=self._action_reset_fs)
+        # ---- Edit ----
+        edit_menu = tk.Menu(menubar, **menu_kw)
+        edit_menu.add_command(label="Preferences…", command=self._show_preferences)
+        edit_menu.add_command(label="Configuration…", command=self._show_configuration)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+
+        # ---- Operations ----
+        ops_menu = tk.Menu(menubar, **menu_kw)
+        ops_menu.add_command(label="Create File…",      accelerator="Ctrl+F",
+                             command=self._op_create_file)
+        ops_menu.add_command(label="Create Directory…", accelerator="Ctrl+D",
+                             command=self._op_create_directory)
+        ops_menu.add_command(label="Delete…",            command=self._op_delete)
+        ops_menu.add_separator()
+        ops_menu.add_command(label="Defragment",         command=self._op_defragment)
+        menubar.add_cascade(label="Operations", menu=ops_menu)
+
+        # ---- Recovery ----
+        rec_menu = tk.Menu(menubar, **menu_kw)
+        rec_menu.add_command(label="Simulate Crash…",    command=self._rec_simulate_crash)
+        rec_menu.add_command(label="Recover System",      command=self._rec_recover)
+        rec_menu.add_command(label="Run FSCK",            command=self._rec_fsck)
+        menubar.add_cascade(label="Recovery", menu=rec_menu)
+
+        # ---- Tools ----
+        tools_menu = tk.Menu(menubar, **menu_kw)
+        tools_menu.add_command(label="Benchmark Performance", command=self._tool_benchmark)
+        tools_menu.add_command(label="Clear Cache",           command=self._tool_clear_cache)
+        tools_menu.add_command(label="Export Report…",       command=self._tool_export_report)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
-        # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0,
-                            bg=COLORS["bg_panel"],
-                            fg=COLORS["text_primary"])
-        help_menu.add_command(label="About",
-                              command=self._action_show_about)
+        # ---- Help ----
+        help_menu = tk.Menu(menubar, **menu_kw)
+        help_menu.add_command(label="Documentation", command=self._show_documentation)
+        help_menu.add_command(label="About",          command=self._show_about_dialog)
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
 
-    # ----------------------------------------------------------------- #
-    #  Header banner
-    # ----------------------------------------------------------------- #
-
-    def _build_header(self) -> None:
-        header_frame = tk.Frame(self.root, bg=COLORS["bg_panel"],
-                                height=52)
-        header_frame.pack(fill="x")
-        header_frame.pack_propagate(False)
-
-        title_lbl = tk.Label(
-            header_frame,
-            text="  🗄️  File System Recovery & Optimization Tool",
-            bg=COLORS["bg_panel"],
-            fg=COLORS["text_header"],
-            font=("Segoe UI", 16, "bold"),
-            anchor="w",
-        )
-        title_lbl.pack(side="left", padx=10, fill="y")
-
-        # Quick-refresh button in header
-        refresh_btn = tk.Button(
-            header_frame, text="⟳ Refresh",
-            bg=COLORS["bg_card"], fg=COLORS["accent_blue"],
-            font=FONT_BODY, relief="flat", cursor="hand2",
-            command=self._refresh_dashboard,
-        )
-        refresh_btn.pack(side="right", padx=14, pady=8)
-
-    # ----------------------------------------------------------------- #
-    #  Tabbed notebook
-    # ----------------------------------------------------------------- #
-
-    def _build_notebook(self) -> None:
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=6, pady=(4, 0))
-
-        # Tab 1 – Dashboard
-        self.tab_dashboard = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_dashboard, text="  📊 Dashboard  ")
-        self._build_dashboard_tab()
-
-        # Tab 2 – File Operations
-        self.tab_files = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_files, text="  📁 Files  ")
-        self._build_files_tab()
-
-        # Tab 3 – Tree View
-        self.tab_tree = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_tree, text="  🌳 Tree View  ")
-        self.tree_view = TreeView(self.tab_tree, self.dir_tree, fat=self.fat, fsm=self.fsm, disk=self.disk)
-
-        # Tab 4 – Crash & Recovery
-        self.tab_recovery = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_recovery, text="  💥 Crash & Recovery  ")
-        self._build_recovery_tab()
-
-        # Tab 5 – Defragmentation
-        self.tab_defrag = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_defrag, text="  🛠️ Defragmentation  ")
-        self._build_defrag_tab()
-
-        # Tab 6 – Performance Dashboard
-        self.tab_perf = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_perf, text="  📊 Perf Dashboard  ")
-        self.perf_dashboard = PerformanceDashboard(self.tab_perf, self.analyzer)
-
-        # Tab 7 – Block Visualizer
-        self.tab_layout = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_layout, text="  🔳 Block Visualizer  ")
-        self.disk_visualizer = DiskVisualizer(self.tab_layout, self.disk, self.fsm, self.fat)
-
-        # Tab 8 – Journal
-        self.tab_journal = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_journal, text="  📜 Journal  ")
-        self._build_journal_tab()
-
-    # ================================================================= #
-    #  TAB 1 – Dashboard
-    # ================================================================= #
-
-    def _build_dashboard_tab(self) -> None:
-        """Build the system-status dashboard with metric cards."""
-        # --- Metric cards row ---
-        cards_frame = ttk.Frame(self.tab_dashboard)
-        cards_frame.pack(fill="x", padx=10, pady=10)
-
-        # We store StringVars so we can update them later
-        self.sv_disk_usage   = tk.StringVar(value="0.0%")
-        self.sv_free_space   = tk.StringVar(value="100.0%")
-        self.sv_frag         = tk.StringVar(value="0.0%")
-        self.sv_cache_hit    = tk.StringVar(value="0.0%")
-        self.sv_total_files  = tk.StringVar(value="0")
-        self.sv_journal_txns = tk.StringVar(value="0")
-
-        metrics = [
-            ("Disk Usage",      self.sv_disk_usage,   COLORS["accent_primary"]),
-            ("Free Space",      self.sv_free_space,    COLORS["accent_green"]),
-            ("Fragmentation",   self.sv_frag,          COLORS["accent_yellow"]),
-            ("Cache Hit Rate",  self.sv_cache_hit,     COLORS["accent_blue"]),
-            ("Total Files",     self.sv_total_files,   COLORS["accent_orange"]),
-            ("Journal Entries", self.sv_journal_txns,  COLORS["text_secondary"]),
-        ]
-
-        for i, (label_text, sv, color) in enumerate(metrics):
-            card = tk.Frame(cards_frame, bg=COLORS["bg_panel"],
-                            highlightbackground=COLORS["border"],
-                            highlightthickness=1,
-                            padx=14, pady=10)
-            card.grid(row=0, column=i, padx=6, sticky="nsew")
-            cards_frame.columnconfigure(i, weight=1)
-
-            tk.Label(card, textvariable=sv,
-                     bg=COLORS["bg_panel"], fg=color,
-                     font=("Segoe UI", 20, "bold")).pack()
-            tk.Label(card, text=label_text,
-                     bg=COLORS["bg_panel"],
-                     fg=COLORS["text_secondary"],
-                     font=FONT_SMALL).pack()
-
-        # --- Disk usage progress bar ---
-        bar_frame = ttk.Frame(self.tab_dashboard)
-        bar_frame.pack(fill="x", padx=16, pady=(0, 6))
-
-        ttk.Label(bar_frame, text="Disk Capacity:").pack(side="left")
-        self.pb_disk = ttk.Progressbar(bar_frame, length=400,
-                                        style="green.Horizontal.TProgressbar")
-        self.pb_disk.pack(side="left", padx=8, fill="x", expand=True)
-
-        # --- Disk info text area ---
-        info_frame = ttk.LabelFrame(self.tab_dashboard, text="  Disk Information  ")
-        info_frame.pack(fill="both", expand=True, padx=10, pady=6)
-
-        self.txt_disk_info = tk.Text(
-            info_frame, height=14, wrap="word",
-            bg=COLORS["bg_panel"], fg=COLORS["text_primary"],
-            font=FONT_MONO, insertbackground=COLORS["text_primary"],
-            relief="flat", state="disabled",
-        )
-        self.txt_disk_info.pack(fill="both", expand=True, padx=4, pady=4)
-
-    # ================================================================= #
-    #  TAB 2 – File Operations
-    # ================================================================= #
-
-    def _build_files_tab(self) -> None:
-        """Create file, list files, view directory tree."""
-        top = ttk.Frame(self.tab_files)
-        top.pack(fill="x", padx=10, pady=10)
-
-        # --- Create file controls ---
-        create_lf = ttk.LabelFrame(top, text="  Create File  ")
-        create_lf.pack(side="left", padx=(0, 10), fill="y")
-
-        ttk.Label(create_lf, text="Blocks needed:").grid(
-            row=0, column=0, padx=6, pady=4, sticky="w")
-        self.sp_blocks = tk.Spinbox(
-            create_lf, from_=1, to=50, width=8,
-            bg=COLORS["bg_panel"], fg=COLORS["text_primary"],
-            font=FONT_BODY, buttonbackground=COLORS["bg_card"])
-        self.sp_blocks.grid(row=0, column=1, padx=6, pady=4)
-
-        ttk.Label(create_lf, text="Directory path:").grid(
-            row=1, column=0, padx=6, pady=4, sticky="w")
-        self.ent_file_dir = ttk.Entry(create_lf, width=22)
-        self.ent_file_dir.insert(0, "/")
-        self.ent_file_dir.grid(row=1, column=1, padx=6, pady=4)
-
-        btn_create = ttk.Button(create_lf, text="Create File",
-                                style="Green.TButton",
-                                command=self._action_create_file)
-        btn_create.grid(row=2, column=0, columnspan=2, pady=8, padx=6)
-
-        # --- Directory tree view ---
-        tree_lf = ttk.LabelFrame(top, text="  Directory Tree  ")
-        tree_lf.pack(side="left", fill="both", expand=True)
-
-        self.txt_dir_tree = tk.Text(
-            tree_lf, height=8, wrap="none",
-            bg=COLORS["bg_panel"], fg=COLORS["accent_green"],
-            font=FONT_MONO, relief="flat", state="disabled",
-        )
-        self.txt_dir_tree.pack(fill="both", expand=True, padx=4, pady=4)
-
-        btn_refresh_tree = ttk.Button(tree_lf, text="Refresh Tree",
-                                       command=self._refresh_dir_tree)
-        btn_refresh_tree.pack(pady=4)
-
-        # --- File table ---
-        table_lf = ttk.LabelFrame(self.tab_files, text="  Allocated Files  ")
-        table_lf.pack(fill="both", expand=True, padx=10, pady=6)
-
-        columns = ("inode", "blocks", "fragmented", "size_bytes")
-        self.file_table = ttk.Treeview(table_lf, columns=columns,
-                                        show="headings", height=10)
-        self.file_table.heading("inode", text="Inode #")
-        self.file_table.heading("blocks", text="Block List")
-        self.file_table.heading("fragmented", text="Fragmented?")
-        self.file_table.heading("size_bytes", text="Size (B)")
-        self.file_table.column("inode", width=70, anchor="center")
-        self.file_table.column("blocks", width=300)
-        self.file_table.column("fragmented", width=100, anchor="center")
-        self.file_table.column("size_bytes", width=100, anchor="center")
-        self.file_table.pack(fill="both", expand=True, padx=4, pady=4)
-
-        btn_bar = ttk.Frame(table_lf)
-        btn_bar.pack(fill="x", padx=4, pady=4)
-        ttk.Button(btn_bar, text="Refresh",
-                    command=self._refresh_file_table).pack(side="left", padx=4)
-        ttk.Button(btn_bar, text="Delete Selected",
-                    style="Accent.TButton",
-                    command=self._action_delete_file).pack(side="left", padx=4)
-
-    # ================================================================= #
-    #  TAB 3 – Crash & Recovery
-    # ================================================================= #
-
-    def _build_recovery_tab(self) -> None:
-        """Crash injection controls and recovery pipeline."""
-        top = ttk.Frame(self.tab_recovery)
-        top.pack(fill="x", padx=10, pady=10)
-
-        # --- Crash injection ---
-        crash_lf = ttk.LabelFrame(top, text="  Inject Crash  ")
-        crash_lf.pack(side="left", padx=(0, 10), fill="y")
-
-        ttk.Label(crash_lf, text="Crash type:").grid(
-            row=0, column=0, padx=6, pady=4, sticky="w")
-        self.cmb_crash_type = ttk.Combobox(
-            crash_lf, width=22, state="readonly",
-            values=["Power Failure", "Bit Corruption",
-                     "Sector Failure", "Metadata Corruption",
-                     "Journal Corruption", "Random Crash"])
-        self.cmb_crash_type.current(0)
-        self.cmb_crash_type.grid(row=0, column=1, padx=6, pady=4)
-
-        ttk.Label(crash_lf, text="Affected blocks\n(comma-separated):").grid(
-            row=1, column=0, padx=6, pady=4, sticky="w")
-        self.ent_crash_blocks = ttk.Entry(crash_lf, width=24)
-        self.ent_crash_blocks.insert(0, "11,12,13")
-        self.ent_crash_blocks.grid(row=1, column=1, padx=6, pady=4)
-
-        ttk.Button(crash_lf, text="💥 Inject Crash",
-                    style="Accent.TButton",
-                    command=self._action_inject_crash).grid(
-            row=2, column=0, columnspan=2, padx=6, pady=8)
-
-        # --- Recovery controls ---
-        recover_lf = ttk.LabelFrame(top, text="  Recovery Actions  ")
-        recover_lf.pack(side="left", fill="both", expand=True)
-
-        ttk.Button(recover_lf, text="🔍 Analyze Crash",
-                    command=self._action_analyze_crash).pack(
-            fill="x", padx=10, pady=4)
-        ttk.Button(recover_lf, text="🚑 Recover from Journal",
-                    style="Green.TButton",
-                    command=self._action_recover_journal).pack(
-            fill="x", padx=10, pady=4)
-        ttk.Button(recover_lf, text="🔧 Rebuild Allocation Table",
-                    style="Orange.TButton",
-                    command=self._action_rebuild_fat).pack(
-            fill="x", padx=10, pady=4)
-        ttk.Button(recover_lf, text="✅ Verify Consistency",
-                    command=self._action_verify_consistency).pack(
-            fill="x", padx=10, pady=4)
-
-        # --- Log output ---
-        log_lf = ttk.LabelFrame(self.tab_recovery,
-                                 text="  Recovery Log  ")
-        log_lf.pack(fill="both", expand=True, padx=10, pady=6)
-
-        self.txt_recovery_log = tk.Text(
-            log_lf, height=14, wrap="word",
-            bg=COLORS["bg_panel"], fg=COLORS["text_primary"],
-            font=FONT_MONO_SM, relief="flat",
-            insertbackground=COLORS["text_primary"],
-        )
-        scroll_r = ttk.Scrollbar(log_lf, command=self.txt_recovery_log.yview)
-        self.txt_recovery_log.configure(yscrollcommand=scroll_r.set)
-        scroll_r.pack(side="right", fill="y")
-        self.txt_recovery_log.pack(fill="both", expand=True, padx=4, pady=4)
-
-    # ================================================================= #
-    #  TAB 4 – Defragmentation
-    # ================================================================= #
-
-    def _build_defrag_tab(self) -> None:
-        top = ttk.Frame(self.tab_defrag)
-        top.pack(fill="x", padx=10, pady=10)
-
-        # --- Controls ---
-        ctrl_lf = ttk.LabelFrame(top, text="  Defragmentation Controls  ")
-        ctrl_lf.pack(side="left", padx=(0, 10), fill="y")
-
-        ttk.Label(ctrl_lf, text="Strategy:").grid(
-            row=0, column=0, padx=6, pady=4, sticky="w")
-        self.cmb_defrag_strategy = ttk.Combobox(
-            ctrl_lf, width=22, state="readonly",
-            values=["most_fragmented_first", "largest_first", "sequential"])
-        self.cmb_defrag_strategy.current(0)
-        self.cmb_defrag_strategy.grid(row=0, column=1, padx=6, pady=4)
-
-        ttk.Button(ctrl_lf, text="📊 Analyze Fragmentation",
-                    command=self._action_analyze_fragmentation).grid(
-            row=1, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
-        ttk.Button(ctrl_lf, text="🛠️ Defragment All",
-                    style="Green.TButton",
-                    command=self._action_defragment_all).grid(
-            row=2, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
-        ttk.Button(ctrl_lf, text="📦 Compact Free Space",
-                    style="Orange.TButton",
-                    command=self._action_compact_free_space).grid(
-            row=3, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
-
-        # --- Results ---
-        results_lf = ttk.LabelFrame(top, text="  Fragmentation Analysis  ")
-        results_lf.pack(side="left", fill="both", expand=True)
-
-        self.txt_defrag_results = tk.Text(
-            results_lf, height=8, wrap="word",
-            bg=COLORS["bg_panel"], fg=COLORS["text_primary"],
-            font=FONT_MONO_SM, relief="flat", state="disabled",
-        )
-        self.txt_defrag_results.pack(fill="both", expand=True, padx=4, pady=4)
-
-        # --- Defrag history table ---
-        hist_lf = ttk.LabelFrame(self.tab_defrag,
-                                  text="  Defragmentation History  ")
-        hist_lf.pack(fill="both", expand=True, padx=10, pady=6)
-
-        cols = ("op_id", "type", "inode", "blocks_moved", "time")
-        self.defrag_table = ttk.Treeview(hist_lf, columns=cols,
-                                          show="headings", height=8)
-        for c, heading, w in [
-            ("op_id", "Op #", 60), ("type", "Type", 120),
-            ("inode", "Inode", 70), ("blocks_moved", "Blocks", 80),
-            ("time", "Timestamp", 200),
-        ]:
-            self.defrag_table.heading(c, text=heading)
-            self.defrag_table.column(c, width=w, anchor="center")
-        self.defrag_table.pack(fill="both", expand=True, padx=4, pady=4)
-
-    # ================================================================= #
-    #  TAB 5 – Performance
-    # ================================================================= #
-
-    def _build_performance_tab(self) -> None:
-        top = ttk.Frame(self.tab_perf)
-        top.pack(fill="x", padx=10, pady=10)
-
-        ttk.Button(top, text="📈 Generate Report",
-                    style="Green.TButton",
-                    command=self._action_generate_report).pack(
-            side="left", padx=4)
-        ttk.Button(top, text="🔍 Analyze Bottlenecks",
-                    command=self._action_analyze_bottlenecks).pack(
-            side="left", padx=4)
-        ttk.Button(top, text="⚡ Collect Metrics",
-                    command=self._action_collect_metrics).pack(
-            side="left", padx=4)
-        ttk.Button(top, text="🏆 Performance Score",
-                    style="Orange.TButton",
-                    command=self._action_perf_score).pack(
-            side="left", padx=4)
-
-        report_lf = ttk.LabelFrame(self.tab_perf,
-                                    text="  Performance Report  ")
-        report_lf.pack(fill="both", expand=True, padx=10, pady=6)
-
-        self.txt_perf_report = tk.Text(
-            report_lf, wrap="word",
-            bg=COLORS["bg_panel"], fg=COLORS["text_primary"],
-            font=FONT_MONO, relief="flat", state="disabled",
-        )
-        scroll_p = ttk.Scrollbar(report_lf, command=self.txt_perf_report.yview)
-        self.txt_perf_report.configure(yscrollcommand=scroll_p.set)
-        scroll_p.pack(side="right", fill="y")
-        self.txt_perf_report.pack(fill="both", expand=True, padx=4, pady=4)
-
-    # ================================================================= #
-    #  TAB 6 – Disk Layout Visualization
-    # ================================================================= #
-
-    def _build_layout_tab(self) -> None:
-        ctrl = ttk.Frame(self.tab_layout)
-        ctrl.pack(fill="x", padx=10, pady=10)
-
-        ttk.Button(ctrl, text="Refresh Layout",
-                    style="Green.TButton",
-                    command=self._refresh_layout).pack(side="left", padx=4)
-
-        ttk.Label(ctrl, text="Legend:").pack(side="left", padx=(20, 4))
-        for label, color in [("Free", COLORS["free_block"]),
-                              ("Used", COLORS["used_block"]),
-                              ("Corrupt", COLORS["corrupt_block"])]:
-            tk.Label(ctrl, text=f"  {label}  ", bg=color,
-                     fg="#ffffff", font=FONT_SMALL).pack(side="left", padx=2)
-
-        layout_lf = ttk.LabelFrame(self.tab_layout,
-                                    text="  Block Map  ")
-        layout_lf.pack(fill="both", expand=True, padx=10, pady=6)
-
-        # Canvas for colored block grid
-        self.layout_canvas = tk.Canvas(
-            layout_lf, bg=COLORS["bg_panel"],
-            highlightthickness=0,
-        )
-        self.layout_canvas.pack(fill="both", expand=True, padx=4, pady=4)
-
-    # ================================================================= #
-    #  TAB 7 – Journal
-    # ================================================================= #
-
-    def _build_journal_tab(self) -> None:
-        ctrl = ttk.Frame(self.tab_journal)
-        ctrl.pack(fill="x", padx=10, pady=10)
-
-        ttk.Button(ctrl, text="Refresh Journal",
-                    command=self._refresh_journal).pack(side="left", padx=4)
-        ttk.Button(ctrl, text="Clear Committed",
-                    style="Orange.TButton",
-                    command=self._action_clear_journal).pack(
-            side="left", padx=4)
-        ttk.Button(ctrl, text="Checkpoint",
-                    command=self._action_checkpoint_journal).pack(
-            side="left", padx=4)
-
-        cols = ("txn_id", "operation", "status", "timestamp")
-        self.journal_table = ttk.Treeview(self.tab_journal, columns=cols,
-                                           show="headings", height=16)
-        self.journal_table.heading("txn_id", text="Transaction ID")
-        self.journal_table.heading("operation", text="Operation")
-        self.journal_table.heading("status", text="Status")
-        self.journal_table.heading("timestamp", text="Timestamp")
-        self.journal_table.column("txn_id", width=280)
-        self.journal_table.column("operation", width=100, anchor="center")
-        self.journal_table.column("status", width=110, anchor="center")
-        self.journal_table.column("timestamp", width=200)
-        self.journal_table.pack(fill="both", expand=True, padx=10, pady=6)
-
-    # ----------------------------------------------------------------- #
-    #  Status bar
-    # ----------------------------------------------------------------- #
-
-    def _build_status_bar(self) -> None:
-        self.status_var = tk.StringVar(value="Ready.")
-        status_bar = tk.Label(
-            self.root, textvariable=self.status_var,
-            bg=COLORS["bg_panel"], fg=COLORS["text_secondary"],
-            font=FONT_SMALL, anchor="w", padx=10,
-        )
-        status_bar.pack(fill="x", side="bottom")
-
-    def _set_status(self, msg: str) -> None:
-        self.status_var.set(msg)
-        self.root.update_idletasks()
-
-    # ================================================================= #
-    #  Data refresh helpers
-    # ================================================================= #
-
-    def _refresh_dashboard(self) -> None:
-        """Refresh all dashboard metric cards and info text."""
+        # ---- Keyboard shortcuts ----
+        self.root.bind_all("<Control-n>", lambda e: self.new_disk())
+        self.root.bind_all("<Control-o>", lambda e: self.open_disk())
+        self.root.bind_all("<Control-s>", lambda e: self.save_disk())
+        self.root.bind_all("<Control-Shift-S>", lambda e: self.save_disk_as())
+        self.root.bind_all("<Control-f>", lambda e: self._op_create_file())
+        self.root.bind_all("<Control-d>", lambda e: self._op_create_directory())
+
+    # --------------------------------------------------------------------- #
+    #  File-system initialisation
+    # --------------------------------------------------------------------- #
+
+    def _initialize_file_system(self, total_blocks: int = 1000,
+                                 block_size: int = 4096):
+        """
+        Create a fresh file system with the given parameters and store
+        every component both in ``self.file_system_components`` and as
+        convenience attributes on ``self``.
+        """
         try:
-            metrics = self.analyzer.collect_metrics()
-            self.sv_disk_usage.set(f"{metrics['disk_usage_percentage']:.1f}%")
-            self.sv_free_space.set(f"{metrics['free_space_percentage']:.1f}%")
-            self.sv_frag.set(f"{metrics['fragmentation_percentage']:.1f}%")
-            self.sv_cache_hit.set(f"{metrics['cache_hit_rate']:.1f}%")
-            self.sv_total_files.set(str(len(self.fat.file_to_blocks)))
-            self.sv_journal_txns.set(str(len(self.journal)))
+            self.disk = Disk(total_blocks=total_blocks, block_size=block_size)
+            self.fsm = FreeSpaceManager(total_blocks=total_blocks)
+            self.dir_tree = DirectoryTree()
+            self.fat = FileAllocationTable(allocation_method="indexed")
+            self.journal = Journal(journal_file="data/journal.log")
+            self.crash_sim = CrashSimulator()
+            self.cache = CacheManager(disk=self.disk, cache_size=100)
 
-            self.pb_disk["value"] = metrics["disk_usage_percentage"]
+            # Components dict used by RecoveryManager / Defragmenter / etc.
+            self.file_system_components = {
+                "disk": self.disk,
+                "fsm": self.fsm,
+                "directory_tree": self.dir_tree,
+                "fat": self.fat,
+                "journal": self.journal,
+                "cache": self.cache,
+            }
 
-            # Disk info text
-            info = self.disk.get_disk_info()
+            self.recovery_mgr = RecoveryManager(self.file_system_components)
+            self.defragmenter = Defragmenter(self.file_system_components)
+            self.perf_analyzer = PerformanceAnalyzer(self.file_system_components)
+
+            self.inode_counter = 1
+            self._unsaved_changes = False
+
+            logger.info("File system initialised: %d blocks × %d B",
+                        total_blocks, block_size)
+        except Exception as exc:
+            logger.exception("Failed to initialise file system")
+            messagebox.showerror("Initialisation Error", str(exc))
+
+    # --------------------------------------------------------------------- #
+    #  Main layout
+    # --------------------------------------------------------------------- #
+
+    def _create_main_layout(self):
+        """Build the three-panel + bottom-log layout."""
+
+        # ── Top-level vertical split: main area on top, log console on bottom ──
+        self._main_frame = ttk.Frame(self.root)
+        self._main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # ── Status bar (above the log) ──
+        self._status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(self._main_frame, textvariable=self._status_var,
+                               anchor=tk.W, padding=(6, 2))
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # ── Log console ──
+        log_frame = ttk.LabelFrame(self._main_frame, text="  Log Console  ",
+                                   height=150)
+        log_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 2))
+        log_frame.pack_propagate(False)
+
+        self._log_text = tk.Text(log_frame, height=7, wrap=tk.WORD,
+                                 bg=self._palette["surface"],
+                                 fg=self._palette["fg"],
+                                 insertbackground=self._palette["fg"],
+                                 font=("Consolas", 9),
+                                 borderwidth=0, relief=tk.FLAT)
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL,
+                                    command=self._log_text.yview)
+        self._log_text.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._log_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self._log("Application started.")
+
+        # ── Horizontal PanedWindow for 3-panel layout ──
+        panes = ttk.PanedWindow(self._main_frame, orient=tk.HORIZONTAL)
+        panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # ---------- LEFT PANEL (Directory Tree & Controls) ----------
+        left_panel = ttk.Frame(panes, width=350)
+        panes.add(left_panel, weight=1)
+
+        self._build_left_panel(left_panel)
+
+        # ---------- CENTRE PANEL (Disk Visualisation) ----------
+        centre_panel = ttk.Frame(panes, width=700)
+        panes.add(centre_panel, weight=2)
+
+        self._build_centre_panel(centre_panel)
+
+        # ---------- RIGHT PANEL (Performance Dashboard) ----------
+        right_panel = ttk.Frame(panes, width=350)
+        panes.add(right_panel, weight=1)
+
+        self._build_right_panel(right_panel)
+
+    # ------------------------------------------------------------------ #
+    #  LEFT panel — directory tree + quick controls
+    # ------------------------------------------------------------------ #
+
+    def _build_left_panel(self, parent: ttk.Frame):
+        """Populate the left panel with a Treeview and action buttons."""
+
+        # ---- Directory tree ----
+        tree_frame = ttk.LabelFrame(parent, text="  Directory Tree  ")
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        self._dir_tree_view = ttk.Treeview(tree_frame, show="tree")
+        tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL,
+                                     command=self._dir_tree_view.yview)
+        self._dir_tree_view.configure(yscrollcommand=tree_scroll.set)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._dir_tree_view.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # ---- Quick controls ----
+        ctrl_frame = ttk.LabelFrame(parent, text="  Quick Controls  ")
+        ctrl_frame.pack(fill=tk.X, padx=2, pady=2)
+
+        btn_kw = dict(padding=(6, 3))
+        ttk.Button(ctrl_frame, text="📁 New Directory", command=self._op_create_directory, **btn_kw).pack(fill=tk.X, padx=4, pady=1)
+        ttk.Button(ctrl_frame, text="📄 New File",      command=self._op_create_file,      **btn_kw).pack(fill=tk.X, padx=4, pady=1)
+        ttk.Button(ctrl_frame, text="🗑  Delete",        command=self._op_delete,            **btn_kw).pack(fill=tk.X, padx=4, pady=1)
+        ttk.Button(ctrl_frame, text="🔄 Refresh",       command=self._update_all_panels,    **btn_kw).pack(fill=tk.X, padx=4, pady=(1, 4))
+
+        # ---- Disk info ----
+        info_frame = ttk.LabelFrame(parent, text="  Disk Info  ")
+        info_frame.pack(fill=tk.X, padx=2, pady=2)
+
+        self._disk_info_var = tk.StringVar(value="—")
+        ttk.Label(info_frame, textvariable=self._disk_info_var,
+                  wraplength=300, justify=tk.LEFT).pack(padx=4, pady=4)
+
+    # ------------------------------------------------------------------ #
+    #  CENTRE panel — disk visualisation (block grid)
+    # ------------------------------------------------------------------ #
+
+    def _build_centre_panel(self, parent: ttk.Frame):
+        """Populate the centre panel with a canvas-based block grid."""
+
+        vis_frame = ttk.LabelFrame(parent, text="  Disk Block Visualisation  ")
+        vis_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        self._disk_canvas = tk.Canvas(vis_frame,
+                                      bg=self._palette["surface"],
+                                      highlightthickness=0)
+        self._disk_canvas.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # Fragmentation bar
+        frag_frame = ttk.LabelFrame(parent, text="  Fragmentation  ")
+        frag_frame.pack(fill=tk.X, padx=2, pady=2)
+
+        self._frag_var = tk.DoubleVar(value=0.0)
+        self._frag_bar = ttk.Progressbar(frag_frame, variable=self._frag_var,
+                                          maximum=100,
+                                          style="Horizontal.TProgressbar")
+        self._frag_bar.pack(fill=tk.X, padx=8, pady=2)
+
+        self._frag_label_var = tk.StringVar(value="Fragmentation: 0.0 %")
+        ttk.Label(frag_frame, textvariable=self._frag_label_var).pack(pady=(0, 4))
+
+    # ------------------------------------------------------------------ #
+    #  RIGHT panel — performance dashboard
+    # ------------------------------------------------------------------ #
+
+    def _build_right_panel(self, parent: ttk.Frame):
+        """Populate the right panel with performance metrics."""
+
+        perf_frame = ttk.LabelFrame(parent, text="  Performance Dashboard  ")
+        perf_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        self._perf_text = tk.Text(perf_frame, wrap=tk.WORD,
+                                   bg=self._palette["surface"],
+                                   fg=self._palette["fg"],
+                                   font=("Consolas", 9),
+                                   borderwidth=0, relief=tk.FLAT,
+                                   state=tk.DISABLED)
+        perf_scroll = ttk.Scrollbar(perf_frame, orient=tk.VERTICAL,
+                                     command=self._perf_text.yview)
+        self._perf_text.configure(yscrollcommand=perf_scroll.set)
+        perf_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._perf_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # Actions
+        action_frame = ttk.LabelFrame(parent, text="  Actions  ")
+        action_frame.pack(fill=tk.X, padx=2, pady=2)
+
+        ttk.Button(action_frame, text="▶ Benchmark",  command=self._tool_benchmark).pack(fill=tk.X, padx=4, pady=1)
+        ttk.Button(action_frame, text="🧹 Clear Cache", command=self._tool_clear_cache).pack(fill=tk.X, padx=4, pady=1)
+        ttk.Button(action_frame, text="⚠ Simulate Crash", command=self._rec_simulate_crash).pack(fill=tk.X, padx=4, pady=1)
+        ttk.Button(action_frame, text="🔧 Recover",     command=self._rec_recover).pack(fill=tk.X, padx=4, pady=(1, 4))
+
+        # Journal summary
+        journal_frame = ttk.LabelFrame(parent, text="  Journal  ")
+        journal_frame.pack(fill=tk.X, padx=2, pady=2)
+
+        self._journal_var = tk.StringVar(value="—")
+        ttk.Label(journal_frame, textvariable=self._journal_var,
+                  wraplength=300, justify=tk.LEFT).pack(padx=4, pady=4)
+
+    # --------------------------------------------------------------------- #
+    #  Panel refresh helpers
+    # --------------------------------------------------------------------- #
+
+    def _update_all_panels(self):
+        """Refresh every UI panel with current state."""
+        self._refresh_directory_tree()
+        self._refresh_disk_canvas()
+        self._refresh_dashboard()
+        self._refresh_disk_info()
+        self._refresh_journal_info()
+
+    def _refresh_dashboard(self):
+        """Redraw the performance dashboard text widget."""
+        try:
+            metrics = self.perf_analyzer.collect_metrics()
+            score = self.perf_analyzer.calculate_performance_score()
+            cache_stats = self.cache.get_cache_stats()
+            disk_info = self.disk.get_disk_info()
+
             lines = [
-                f"Total Blocks:      {info['total_blocks']}",
-                f"Block Size:        {info['block_size']} B",
-                f"Total Capacity:    {info['total_capacity_mb']:.2f} MB",
-                f"Blocks Used:       {info['blocks_used']}",
-                f"Blocks Free:       {info['blocks_free']}",
-                f"Total Reads:       {info['total_reads']}",
-                f"Total Writes:      {info['total_writes']}",
+                f"=== Performance Score: {score:.1f} / 100 ===",
                 "",
-                f"Allocation Strategy: {self.fsm.allocation_strategy}",
-                f"FAT Method:        {self.fat.allocation_method}",
-                f"Files Tracked:     {len(self.fat.file_to_blocks)}",
-                f"Cache Strategy:    {self.cache.strategy}",
-                f"Cache Size:        {len(self.cache.cache_data)}/{self.cache.cache_size}",
+                f"Disk usage:      {metrics.get('disk_usage_percentage', 0):.1f} %",
+                f"Free space:      {metrics.get('free_space_percentage', 100):.1f} %",
+                f"Fragmentation:   {metrics.get('fragmentation_percentage', 0):.1f} %",
+                "",
+                f"Cache hit rate:  {cache_stats.get('hit_rate', 0):.1f} %",
+                f"Cache size:      {cache_stats.get('cache_size', 0)}"
+                f" / {cache_stats.get('max_cache_size', 0)}",
+                f"Evictions:       {cache_stats.get('eviction_count', 0)}",
+                "",
+                f"Total reads:     {disk_info.get('total_reads', 0)}",
+                f"Total writes:    {disk_info.get('total_writes', 0)}",
+                f"Blocks used:     {disk_info.get('blocks_used', 0)}"
+                f" / {disk_info.get('total_blocks', 0)}",
             ]
-            self._set_text(self.txt_disk_info, "\n".join(lines))
-            self._set_status("Dashboard refreshed.")
-        except Exception as e:
-            logger.error("Dashboard refresh error: %s", e)
-            self._set_status(f"Error: {e}")
+            text = "\n".join(lines)
 
-    def _refresh_file_table(self) -> None:
-        """Reload the file-list treeview."""
-        self.file_table.delete(*self.file_table.get_children())
-        for inode_num, blocks in self.fat.file_to_blocks.items():
-            frag = self.fat.is_fragmented(inode_num)
-            size = len(blocks) * self.disk.block_size if isinstance(blocks, list) else 0
-            self.file_table.insert("", "end", values=(
-                inode_num,
-                str(blocks),
-                "Yes" if frag else "No",
-                size,
-            ))
-        self._set_status(f"File table refreshed — {len(self.fat.file_to_blocks)} files.")
+            self._perf_text.configure(state=tk.NORMAL)
+            self._perf_text.delete("1.0", tk.END)
+            self._perf_text.insert(tk.END, text)
+            self._perf_text.configure(state=tk.DISABLED)
 
-    def _refresh_dir_tree(self) -> None:
-        """Reload the directory tree text view."""
-        tree_str = self.dir_tree.get_tree_structure()
-        self._set_text(self.txt_dir_tree, tree_str)
+            frag = metrics.get("fragmentation_percentage", 0)
+            self._frag_var.set(frag)
+            self._frag_label_var.set(f"Fragmentation: {frag:.1f} %")
+        except Exception as exc:
+            logger.debug("Dashboard refresh error: %s", exc)
 
-    def _refresh_layout(self) -> None:
-        """Redraw the disk-block grid on the canvas."""
-        self.layout_canvas.delete("all")
-        canvas = self.layout_canvas
-        canvas.update_idletasks()
-        cw = max(canvas.winfo_width(), 400)
-        ch = max(canvas.winfo_height(), 300)
+    def _refresh_directory_tree(self):
+        """Rebuild the Treeview from the DirectoryTree model."""
+        tree = self._dir_tree_view
+        tree.delete(*tree.get_children())
+
+        def _insert(parent_id, node):
+            label = node.name
+            if node.is_directory:
+                label += "/"
+            iid = tree.insert(parent_id, tk.END, text=label, open=True)
+            if node.is_directory:
+                for child_name in sorted(node.children.keys()):
+                    _insert(iid, node.children[child_name])
+
+        _insert("", self.dir_tree.root)
+
+    def _refresh_disk_canvas(self):
+        """Draw a colour-coded block grid on the canvas."""
+        canvas = self._disk_canvas
+        canvas.delete("all")
 
         total = self.disk.total_blocks
-        cols = max(1, cw // 10)
-        block_w = cw / cols
-        block_h = min(block_w, ch / max(1, (total // cols + 1)))
+        cw = canvas.winfo_width() or 680
+        ch = canvas.winfo_height() or 400
 
-        for idx in range(total):
-            r = idx // cols
-            c = idx % cols
-            x1 = c * block_w
-            y1 = r * block_h
-            x2 = x1 + block_w - 1
-            y2 = y1 + block_h - 1
+        # Decide grid dimensions
+        cols = max(1, cw // 8)
+        rows = max(1, (total + cols - 1) // cols)
+        cell_w = max(2, cw / cols)
+        cell_h = max(2, ch / rows)
 
-            # Determine color
-            data = self.disk.blocks[idx]
-            if data is not None and (b"CORRUPTED" in data or b"BAD_SECTOR" in data):
-                color = COLORS["corrupt_block"]
-            elif self.fsm.bitmap[idx]:
-                color = COLORS["used_block"]
+        p = self._palette
+        for i in range(total):
+            r = i // cols
+            c = i % cols
+            x1 = c * cell_w
+            y1 = r * cell_h
+            x2 = x1 + cell_w - 1
+            y2 = y1 + cell_h - 1
+
+            # Determine colour
+            owner = self.fat.block_to_file.get(i)
+            if owner is not None:
+                # Pick a hue based on inode number
+                hue_idx = owner % 6
+                colours = [p["accent"], p["green"], p["yellow"],
+                           p["red"], "#cba6f7", "#fab387"]
+                colour = colours[hue_idx]
+            elif self.fsm.bitmap[i] == 1:
+                colour = p["yellow"]        # allocated but unowned
             else:
-                color = COLORS["free_block"]
+                colour = p["surface"]       # free
 
-            canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="")
+            canvas.create_rectangle(x1, y1, x2, y2,
+                                    fill=colour, outline="")
 
-        self._set_status("Disk layout refreshed.")
-
-    def _refresh_journal(self) -> None:
-        """Reload journal transaction table."""
-        self.journal_table.delete(*self.journal_table.get_children())
-        for entry in self.journal.entries:
-            self.journal_table.insert("", "end", values=(
-                entry.transaction_id,
-                entry.operation,
-                entry.status,
-                entry.timestamp.isoformat() if hasattr(entry.timestamp, "isoformat") else str(entry.timestamp),
-            ))
-        self._set_status(f"Journal refreshed — {len(self.journal.entries)} entries.")
-
-    def _refresh_defrag_history(self) -> None:
-        """Reload defragmentation history table."""
-        self.defrag_table.delete(*self.defrag_table.get_children())
-        for op in self.defrag.defrag_history:
-            self.defrag_table.insert("", "end", values=(
-                op.get("operation_id", ""),
-                op.get("type", ""),
-                op.get("inode_number", ""),
-                len(op.get("new_blocks", op.get("old_blocks", []))),
-                str(op.get("timestamp", "")),
-            ))
-
-    # ================================================================= #
-    #  Action handlers
-    # ================================================================= #
-
-    # --- File Operations --- #
-
-    def _action_create_file(self) -> None:
-        """Create a new simulated file with intentional fragmentation."""
+    def _refresh_disk_info(self):
+        """Update the disk-info label."""
         try:
-            blocks_needed = int(self.sp_blocks.get())
-        except ValueError:
-            messagebox.showwarning("Invalid Input", "Blocks must be a positive integer.")
-            return
-
-        allocated = []
-        candidate = 10
-        while len(allocated) < blocks_needed and candidate < self.disk.total_blocks:
-            if self.fsm.bitmap[candidate] == 0:
-                self.fsm.bitmap[candidate] = 1
-                allocated.append(candidate)
-            candidate += 2  # intentional fragmentation
-
-        if len(allocated) < blocks_needed:
-            messagebox.showwarning("Allocation Failed",
-                                   f"Could only allocate {len(allocated)}/{blocks_needed} blocks.")
-            if not allocated:
-                return
-
-        inode_num = self.inode_counter
-        self.inode_counter += 1
-
-        self.fat.file_to_blocks[inode_num] = allocated
-        for b in allocated:
-            self.fat.block_to_file[b] = inode_num
-
-        # Write through cache
-        self.cache.put(allocated[0],
-                       f"DATA_INODE_{inode_num}".encode("utf-8").ljust(
-                           self.disk.block_size, b"\x00"))
-
-        # Journal
-        txn_id = self.journal.begin_transaction(
-            "WRITE", {"inode": inode_num, "blocks": allocated})
-        self.journal.commit_transaction(txn_id)
-
-        self._refresh_dashboard()
-        self._refresh_file_table()
-        self._set_status(f"Created file (inode {inode_num}) with {len(allocated)} blocks.")
-
-    def _action_delete_file(self) -> None:
-        """Delete the selected file from the treeview."""
-        selected = self.file_table.selection()
-        if not selected:
-            messagebox.showinfo("No Selection", "Select a file row first.")
-            return
-        item = self.file_table.item(selected[0])
-        inode_num = int(item["values"][0])
-
-        blocks = self.fat.deallocate(inode_num)
-        if blocks:
-            self.fsm.deallocate_blocks(blocks)
-            txn_id = self.journal.begin_transaction(
-                "DELETE", {"inode": inode_num, "blocks": blocks})
-            self.journal.commit_transaction(txn_id)
-
-        self._refresh_dashboard()
-        self._refresh_file_table()
-        self._set_status(f"Deleted file inode {inode_num}.")
-
-    # --- Crash & Recovery --- #
-
-    def _action_inject_crash(self) -> None:
-        crash_type = self.cmb_crash_type.get()
-        blocks_str = self.ent_crash_blocks.get().strip()
-        blocks = []
-        if blocks_str:
-            try:
-                blocks = [int(b.strip()) for b in blocks_str.split(",") if b.strip()]
-            except ValueError:
-                messagebox.showwarning("Invalid Blocks", "Enter comma-separated integers.")
-                return
-
-        report = {}
-        if crash_type == "Power Failure":
-            report = self.simulator.inject_power_failure(self.disk, affected_blocks=blocks or None)
-        elif crash_type == "Bit Corruption":
-            report = self.simulator.inject_bit_corruption(self.disk, num_blocks=len(blocks) or 5)
-        elif crash_type == "Sector Failure":
-            report = self.simulator.inject_sector_failure(self.disk)
-        elif crash_type == "Metadata Corruption":
-            report = self.simulator.inject_metadata_corruption(self.dir_tree)
-        elif crash_type == "Journal Corruption":
-            report = self.simulator.inject_journal_corruption(self.journal)
-        elif crash_type == "Random Crash":
-            report = self.simulator.simulate_random_crash(self.fs_components)
-
-        self._append_recovery_log(
-            f"💥 CRASH INJECTED: {report.get('crash_type', crash_type)}\n"
-            f"   Severity: {report.get('severity', 'N/A')}\n"
-            f"   Description: {report.get('description', 'N/A')}\n"
-            f"   Recoverable: {report.get('recoverable', 'N/A')}\n"
-        )
-        self._refresh_dashboard()
-        self._set_status(f"Crash injected: {crash_type}")
-
-    def _action_analyze_crash(self) -> None:
-        analysis = self.recovery_mgr.analyze_crash()
-        lines = [
-            "🔍 CRASH ANALYSIS",
-            f"   Corruption detected: {analysis['has_corruption']}",
-            f"   Corrupted blocks: {analysis['corrupted_blocks']}",
-            f"   Uncommitted txns: {len(analysis['uncommitted_transactions'])}",
-            f"   Metadata issues: {analysis['inconsistent_metadata']}",
-            f"   Recommended: {analysis['recommended_recovery_method']}",
-        ]
-        self._append_recovery_log("\n".join(lines) + "\n")
-        self._set_status("Crash analysis complete.")
-
-    def _action_recover_journal(self) -> None:
-        """Full recovery pipeline: repair corrupted blocks → fixup FAT/FSM → FSCK."""
-        start = time.time()
-
-        # Step 1 – Scan disk and repair corrupted blocks
-        corrupted_blocks = []
-        for i in range(self.disk.total_blocks):
-            data = self.disk.blocks[i]
-            if isinstance(data, bytes) and (
-                    b"CORRUPTED" in data or b"BAD_SECTOR" in data):
-                corrupted_blocks.append(i)
-                # Clear the corruption marker from disk
-                self.disk.blocks[i] = None
-                # Free in FSM
-                if self.fsm.bitmap[i] == 1:
-                    self.fsm.bitmap[i] = 0
-                # Remove from FAT mappings
-                owner = self.fat.block_to_file.pop(i, None)
-                if owner is not None and owner in self.fat.file_to_blocks:
-                    blocks = self.fat.file_to_blocks[owner]
-                    if isinstance(blocks, list) and i in blocks:
-                        blocks.remove(i)
-                    # Remove empty file entries
-                    if not self.fat.file_to_blocks[owner]:
-                        del self.fat.file_to_blocks[owner]
-
-        # Step 2 – Roll back any PENDING journal entries
-        rolled_back = []
-        for entry in self.journal.entries:
-            status = getattr(entry, "status", None)
-            if status in ("PENDING", "UNCOMMITTED"):
-                entry.status = "ABORTED"
-                rolled_back.append(getattr(entry, "transaction_id", "?"))
-
-        # Step 3 – Auto-repair FSM ↔ FAT inconsistencies
-        fsck = self.recovery_mgr.perform_fsck(auto_repair=True)
-
-        # Step 4 – Verify final state
-        verification = self.recovery_mgr.verify_consistency()
-        elapsed = time.time() - start
-
-        lines = [
-            "🚑 RECOVERY PIPELINE COMPLETE",
-            f"   Corrupted blocks repaired: {len(corrupted_blocks)} {corrupted_blocks}",
-            f"   Transactions rolled back:  {len(rolled_back)}",
-            f"   FSCK auto-repaired:        {fsck['auto_repaired']}",
-            f"   Consistency:               {'✅ OK' if verification['is_consistent'] else '⚠ Issues remain'}",
-            f"   Time:                      {elapsed:.4f}s",
-        ]
-        if not verification["is_consistent"]:
-            for issue in verification.get("issues", []):
-                lines.append(f"   ⚠ {issue}")
-        self._append_recovery_log("\n".join(lines) + "\n")
-        self._refresh_dashboard()
-        self._set_status("Recovery pipeline complete.")
-
-    def _action_rebuild_fat(self) -> None:
-        """Non-destructive FAT rebuild: remove entries for corrupted/freed blocks."""
-        repaired = 0
-        removed_files = []
-
-        for inode_num, blocks in list(self.fat.file_to_blocks.items()):
-            if not isinstance(blocks, list):
-                continue
-            valid_blocks = []
-            for b in blocks:
-                data = self.disk.blocks[b] if b < self.disk.total_blocks else None
-                is_corrupt = isinstance(data, bytes) and (
-                    b"CORRUPTED" in data or b"BAD_SECTOR" in data)
-                if is_corrupt or self.fsm.bitmap[b] == 0:
-                    # Block is corrupt or freed — remove from FAT
-                    self.fat.block_to_file.pop(b, None)
-                    if is_corrupt:
-                        self.disk.blocks[b] = None
-                        self.fsm.bitmap[b] = 0
-                    repaired += 1
-                else:
-                    valid_blocks.append(b)
-
-            if valid_blocks:
-                self.fat.file_to_blocks[inode_num] = valid_blocks
-            else:
-                del self.fat.file_to_blocks[inode_num]
-                removed_files.append(inode_num)
-
-        # Run FSCK to fix any remaining inconsistencies
-        self.recovery_mgr.perform_fsck(auto_repair=True)
-
-        self._append_recovery_log(
-            f"🔧 Rebuild FAT: Repaired {repaired} block mappings, "
-            f"removed {len(removed_files)} empty file(s).\n")
-        self._refresh_dashboard()
-        self._set_status(f"FAT rebuilt — {repaired} blocks repaired.")
-
-    def _action_verify_consistency(self) -> None:
-        result = self.recovery_mgr.verify_consistency()
-        lines = [
-            "✅ CONSISTENCY CHECK",
-            f"   Consistent: {result['is_consistent']}",
-        ]
-        for issue in result.get("issues", []):
-            lines.append(f"   ⚠ {issue}")
-        self._append_recovery_log("\n".join(lines) + "\n")
-
-    # --- Defragmentation --- #
-
-    def _action_analyze_fragmentation(self) -> None:
-        analysis = self.defrag.analyze_fragmentation()
-        lines = [
-            f"Total files:          {analysis['total_files']}",
-            f"Fragmented files:     {analysis['fragmented_files']}",
-            f"Fragmentation %:      {analysis['fragmentation_percentage']:.1f}%",
-            f"Total gaps:           {analysis['total_gaps']}",
-            f"Avg fragments/file:   {analysis['average_fragments_per_file']:.2f}",
-            "",
-            "Most fragmented files:",
-        ]
-        for f in analysis.get("most_fragmented_files", [])[:5]:
-            lines.append(
-                f"  Inode {f['inode_number']}: "
-                f"score={f['fragmentation_score']:.1f}%, "
-                f"blocks={f['total_blocks']}")
-        self._set_text(self.txt_defrag_results, "\n".join(lines))
-        self._set_status("Fragmentation analysis complete.")
-
-    def _action_defragment_all(self) -> None:
-        strategy = self.cmb_defrag_strategy.get()
-        self._set_status("Defragmenting…")
-        report = self.defrag.defragment_all(strategy=strategy)
-        lines = [
-            f"Strategy:               {report['strategy_used']}",
-            f"Files processed:        {report['files_processed']}",
-            f"Total blocks moved:     {report['total_blocks_moved']}",
-            f"Time:                   {report['time_taken']:.4f}s",
-            f"Initial frag %:         {report['initial_fragmentation_percentage']:.1f}%",
-            f"Final frag %:           {report['final_fragmentation_percentage']:.1f}%",
-        ]
-        self._set_text(self.txt_defrag_results, "\n".join(lines))
-        self._refresh_defrag_history()
-        self._refresh_dashboard()
-        self._set_status("Defragmentation complete.")
-
-    def _action_compact_free_space(self) -> None:
-        self._set_status("Compacting free space…")
-        report = self.defrag.compact_free_space()
-        lines = [
-            f"Files moved:    {report['files_moved']}",
-            f"Blocks moved:   {report['blocks_moved']}",
-            f"Time:           {report['time_taken']:.4f}s",
-        ]
-        self._set_text(self.txt_defrag_results, "\n".join(lines))
-        self._refresh_dashboard()
-        self._set_status("Free space compaction complete.")
-
-    # --- Performance --- #
-
-    def _action_generate_report(self) -> None:
-        report = self.analyzer.generate_performance_report(output_format="text")
-        self._set_text(self.txt_perf_report, report)
-        self._set_status("Performance report generated.")
-
-    def _action_analyze_bottlenecks(self) -> None:
-        result = self.analyzer.analyze_bottlenecks()
-        lines = ["=== Bottleneck Analysis ===\n"]
-        lines.append("Bottlenecks:")
-        for b in result["bottlenecks"]:
-            lines.append(f"  • {b}")
-        lines.append("\nRecommendations:")
-        for r in result["recommendations"]:
-            lines.append(f"  ➜ {r}")
-        self._set_text(self.txt_perf_report, "\n".join(lines))
-        self._set_status("Bottleneck analysis complete.")
-
-    def _action_collect_metrics(self) -> None:
-        metrics = self.analyzer.collect_metrics()
-        lines = ["=== Current Metrics ===\n"]
-        for k, v in metrics.items():
-            if isinstance(v, float):
-                lines.append(f"  {k}: {v:.2f}")
-            else:
-                lines.append(f"  {k}: {v}")
-        self._set_text(self.txt_perf_report, "\n".join(lines))
-        self._set_status("Metrics collected.")
-
-    def _action_perf_score(self) -> None:
-        score = self.analyzer.calculate_performance_score()
-        lines = [
-            "=== Performance Score ===\n",
-            f"  Overall Score: {score:.1f} / 100.0",
-            "",
-            "  Scoring breakdown:",
-            "  • Fragmentation penalty (up to -30)",
-            "  • Cache miss penalty   (up to -40)",
-            "  • Low free space penalty",
-        ]
-        self._set_text(self.txt_perf_report, "\n".join(lines))
-        self._set_status(f"Performance score: {score:.1f}")
-
-    # --- Menu actions --- #
-
-    def _action_save_disk(self) -> None:
-        path = filedialog.asksaveasfilename(
-            defaultextension=".img",
-            filetypes=[("Disk Image", "*.img"), ("All Files", "*.*")])
-        if path:
-            if self.disk.save_to_file(path):
-                messagebox.showinfo("Saved", f"Disk state saved to:\n{path}")
-            else:
-                messagebox.showerror("Error", "Failed to save disk state.")
-
-    def _action_load_disk(self) -> None:
-        path = filedialog.askopenfilename(
-            filetypes=[("Disk Image", "*.img"), ("All Files", "*.*")])
-        if path:
-            try:
-                self.disk = Disk.load_from_file(path)
-                self.fs_components["disk"] = self.disk
-                self._refresh_dashboard()
-                messagebox.showinfo("Loaded", f"Disk state loaded from:\n{path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load: {e}")
-
-    def _action_export_report(self) -> None:
-        path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text", "*.txt"), ("JSON", "*.json")])
-        if path:
-            fmt = "json" if path.endswith(".json") else "text"
-            report = self.analyzer.generate_performance_report(output_format=fmt)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(report)
-            messagebox.showinfo("Exported", f"Report saved to:\n{path}")
-
-    def _action_format_disk(self) -> None:
-        if messagebox.askyesno("Confirm", "Format disk? This will erase all data."):
-            self.disk.format_disk()
-            self.fsm.bitmap.setall(0)
-            self.fat.file_to_blocks.clear()
-            self.fat.block_to_file.clear()
-            self.fat.next_pointers.clear()
-            self.journal.clear_journal(keep_uncommitted=False)
-            self.inode_counter = 1
-            self._refresh_dashboard()
-            self._set_status("Disk formatted.")
-
-    def _action_run_fsck(self) -> None:
-        result = self.recovery_mgr.perform_fsck(auto_repair=False)
-        lines = ["=== FSCK Results ===\n"]
-        for key, val in result.items():
-            lines.append(f"  {key}: {val}")
-        messagebox.showinfo("FSCK", "\n".join(lines))
-
-    def _action_reset_fs(self) -> None:
-        if messagebox.askyesno("Confirm", "Reset the entire file system?"):
-            self._init_file_system(self.disk.total_blocks, self.disk.block_size)
-            self.inode_counter = 1
-            self._refresh_dashboard()
-            self._set_status("File system reset.")
-
-    def _action_show_about(self) -> None:
-        messagebox.showinfo(
-            "About",
-            "File System Recovery & Optimization Tool\n\n"
-            "A comprehensive simulator for studying\n"
-            "disk management, crash recovery,\n"
-            "defragmentation, and caching strategies.\n\n"
-            "Built with Python & Tkinter.",
-        )
-
-    # --- Journal actions --- #
-
-    def _action_clear_journal(self) -> None:
-        self.journal.clear_journal(keep_uncommitted=True)
-        self._refresh_journal()
-        self._set_status("Committed journal entries cleared.")
-
-    def _action_checkpoint_journal(self) -> None:
-        self.journal.checkpoint()
-        self._refresh_journal()
-        self._set_status("Journal checkpoint created.")
-
-    # ================================================================= #
-    #  UI utility helpers
-    # ================================================================= #
-
-    @staticmethod
-    def _set_text(widget: tk.Text, text: str) -> None:
-        """Replace the entire contents of a `tk.Text` widget."""
-        widget.configure(state="normal")
-        widget.delete("1.0", "end")
-        widget.insert("1.0", text)
-        widget.configure(state="disabled")
-
-    def _append_recovery_log(self, text: str) -> None:
-        """Append timestamped text to the recovery log."""
-        ts = time.strftime("%H:%M:%S")
-        self.txt_recovery_log.insert("end", f"[{ts}] {text}\n")
-        self.txt_recovery_log.see("end")
-
-    # ----------------------------------------------------------------- #
-    #  Lifecycle
-    # ----------------------------------------------------------------- #
-
-    def _on_close(self) -> None:
-        try:
-            if hasattr(self, 'perf_dashboard'):
-                self.perf_dashboard.stop()
-        except:
+            info = self.disk.get_disk_info()
+            self._disk_info_var.set(
+                f"Blocks: {info['blocks_used']} / {info['total_blocks']}  "
+                f"({info['total_capacity_mb']:.1f} MB)\n"
+                f"Block size: {info['block_size']} B\n"
+                f"Reads: {info['total_reads']}   "
+                f"Writes: {info['total_writes']}"
+            )
+        except Exception:
             pass
+
+    def _refresh_journal_info(self):
+        """Update the journal summary label."""
+        try:
+            stats = self.journal.get_statistics()
+            self._journal_var.set(
+                f"Entries: {stats['total_entries']}  "
+                f"(P:{stats['pending_count']}  "
+                f"C:{stats['committed_count']}  "
+                f"A:{stats['aborted_count']})"
+            )
+        except Exception:
+            pass
+
+    def _schedule_refresh(self):
+        """Schedule a periodic UI refresh (every 2 s)."""
+        self._update_all_panels()
+        self.root.after(2000, self._schedule_refresh)
+
+    # --------------------------------------------------------------------- #
+    #  Log helper
+    # --------------------------------------------------------------------- #
+
+    def _log(self, message: str):
+        """Append a timestamped line to the log console."""
+        ts = time.strftime("%H:%M:%S")
+        self._log_text.insert(tk.END, f"[{ts}] {message}\n")
+        self._log_text.see(tk.END)
+
+    # --------------------------------------------------------------------- #
+    #  File menu handlers
+    # --------------------------------------------------------------------- #
+
+    def new_disk(self):
+        """Prompt for parameters and create a fresh file system."""
+        try:
+            blocks = simpledialog.askinteger(
+                "New Disk", "Total blocks:", initialvalue=1000,
+                minvalue=10, maxvalue=1_000_000, parent=self.root)
+            if blocks is None:
+                return
+            bsize = simpledialog.askinteger(
+                "New Disk", "Block size (bytes):", initialvalue=4096,
+                minvalue=128, maxvalue=65536, parent=self.root)
+            if bsize is None:
+                return
+
+            self._initialize_file_system(blocks, bsize)
+            self._update_all_panels()
+            self.current_disk_path = ""
+            self._log(f"New disk created: {blocks} blocks × {bsize} B")
+            self._status_var.set(f"New disk — {blocks} blocks")
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc))
+
+    def open_disk(self):
+        """Load a disk image file and rebuild all components."""
+        path = filedialog.askopenfilename(
+            title="Open Disk Image",
+            filetypes=[("Disk Images", "*.img *.bin *.dat"), ("All Files", "*.*")],
+            parent=self.root)
+        if not path:
+            return
+        try:
+            self.disk = Disk.load_from_file(path)
+            # Re-initialise dependent components with the loaded disk's geometry
+            tb = self.disk.total_blocks
+            self.fsm = FreeSpaceManager(total_blocks=tb)
+            self.dir_tree = DirectoryTree()
+            self.fat = FileAllocationTable(allocation_method="indexed")
+            self.journal = Journal(journal_file="data/journal.log")
+            self.crash_sim = CrashSimulator()
+            self.cache = CacheManager(disk=self.disk, cache_size=100)
+            self.file_system_components = {
+                "disk": self.disk, "fsm": self.fsm,
+                "directory_tree": self.dir_tree, "fat": self.fat,
+                "journal": self.journal, "cache": self.cache,
+            }
+            self.recovery_mgr = RecoveryManager(self.file_system_components)
+            self.defragmenter = Defragmenter(self.file_system_components)
+            self.perf_analyzer = PerformanceAnalyzer(self.file_system_components)
+
+            self.current_disk_path = path
+            self._update_all_panels()
+            self._log(f"Disk loaded from {path}")
+            self._status_var.set(f"Loaded: {os.path.basename(path)}")
+        except Exception as exc:
+            logger.exception("Failed to open disk")
+            messagebox.showerror("Open Error", str(exc))
+
+    def save_disk(self):
+        """Save the disk state; prompt for path if none is set."""
+        if not self.current_disk_path:
+            self.save_disk_as()
+            return
+        self._do_save(self.current_disk_path)
+
+    def save_disk_as(self):
+        """Prompt for a file path, then save the disk state."""
+        path = filedialog.asksaveasfilename(
+            title="Save Disk Image As",
+            defaultextension=".img",
+            filetypes=[("Disk Images", "*.img *.bin *.dat"), ("All Files", "*.*")],
+            parent=self.root)
+        if not path:
+            return
+        self.current_disk_path = path
+        self._do_save(path)
+
+    def _do_save(self, path: str):
+        """Persist disk + journal to *path*."""
+        try:
+            self.disk.save_to_file(path)
+            self.journal.save_journal()
+            self._unsaved_changes = False
+            self._log(f"Disk saved to {path}")
+            self._status_var.set(f"Saved: {os.path.basename(path)}")
+            messagebox.showinfo("Save", "Disk state saved successfully.",
+                                parent=self.root)
+        except Exception as exc:
+            logger.exception("Failed to save disk")
+            messagebox.showerror("Save Error", str(exc))
+
+    def exit_application(self):
+        """Prompt to save unsaved changes, then close."""
+        if self._unsaved_changes:
+            ans = messagebox.askyesnocancel(
+                "Unsaved Changes",
+                "You have unsaved changes. Save before exiting?",
+                parent=self.root)
+            if ans is None:   # Cancel
+                return
+            if ans:           # Yes
+                self.save_disk()
+        self.perf_analyzer.stop_monitoring()
         self.root.destroy()
 
-    def run(self) -> None:
-        """Start the Tkinter event loop."""
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+    # --------------------------------------------------------------------- #
+    #  Edit menu handlers
+    # --------------------------------------------------------------------- #
+
+    def _show_preferences(self):
+        messagebox.showinfo("Preferences",
+                            "Preferences panel not yet implemented.",
+                            parent=self.root)
+
+    def _show_configuration(self):
+        messagebox.showinfo("Configuration",
+                            "Configuration panel not yet implemented.",
+                            parent=self.root)
+
+    # --------------------------------------------------------------------- #
+    #  Operations menu handlers
+    # --------------------------------------------------------------------- #
+
+    def _op_create_file(self):
+        """Create a new file in the directory tree."""
+        try:
+            path = simpledialog.askstring("Create File",
+                                          "File path (e.g. /home/test.txt):",
+                                          parent=self.root)
+            if not path:
+                return
+
+            num_blocks = simpledialog.askinteger("Create File",
+                                                  "Number of blocks:",
+                                                  initialvalue=2,
+                                                  minvalue=1, maxvalue=100,
+                                                  parent=self.root)
+            if num_blocks is None:
+                return
+
+            inode_num = self.inode_counter
+            blocks = self.fsm.allocate_blocks(num_blocks, contiguous=False)
+            if blocks is None:
+                messagebox.showwarning("Allocation Failed",
+                                       "Not enough free space.",
+                                       parent=self.root)
+                return
+
+            self.fat.allocate(inode_num, blocks)
+            inode = Inode(inode_number=inode_num, file_type="file",
+                          size=num_blocks * self.disk.block_size)
+
+            # Ensure parent directories exist
+            parts = path.rsplit("/", 1)
+            if len(parts) == 2 and parts[0]:
+                self.dir_tree.create_directory(parts[0])
+
+            if not self.dir_tree.create_file(path, inode):
+                messagebox.showwarning("Create File",
+                                       f"Could not create '{path}'.",
+                                       parent=self.root)
+                return
+
+            # Write placeholder data
+            for b in blocks:
+                self.disk.write_block(b, f"DATA_{inode_num}".encode().ljust(
+                    self.disk.block_size, b"\x00"))
+
+            # Journal
+            txn = self.journal.begin_transaction("CREATE",
+                                                  {"path": path,
+                                                   "inode": inode_num,
+                                                   "blocks": blocks})
+            self.journal.commit_transaction(txn)
+
+            self.inode_counter += 1
+            self._unsaved_changes = True
+            self._update_all_panels()
+            self._log(f"Created file: {path}  ({num_blocks} blocks)")
+        except Exception as exc:
+            logger.exception("Create file failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    def _op_create_directory(self):
+        """Create a new directory."""
+        try:
+            path = simpledialog.askstring("Create Directory",
+                                          "Directory path (e.g. /home/docs):",
+                                          parent=self.root)
+            if not path:
+                return
+            if self.dir_tree.create_directory(path):
+                txn = self.journal.begin_transaction("MKDIR",
+                                                      {"path": path})
+                self.journal.commit_transaction(txn)
+                self._unsaved_changes = True
+                self._update_all_panels()
+                self._log(f"Created directory: {path}")
+            else:
+                messagebox.showwarning("Create Directory",
+                                       f"Could not create '{path}'.",
+                                       parent=self.root)
+        except Exception as exc:
+            logger.exception("Create directory failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    def _op_delete(self):
+        """Delete a file or directory."""
+        try:
+            path = simpledialog.askstring("Delete",
+                                          "Path to delete:",
+                                          parent=self.root)
+            if not path:
+                return
+            node = self.dir_tree.resolve_path(path)
+            if node is None:
+                messagebox.showwarning("Delete", f"'{path}' not found.",
+                                       parent=self.root)
+                return
+
+            # Free associated blocks if it's a file with an inode
+            if node.inode is not None:
+                freed = self.fat.deallocate(node.inode.inode_number)
+                if freed:
+                    self.fsm.deallocate_blocks(freed)
+
+            self.dir_tree.delete(path, recursive=True)
+            txn = self.journal.begin_transaction("DELETE", {"path": path})
+            self.journal.commit_transaction(txn)
+
+            self._unsaved_changes = True
+            self._update_all_panels()
+            self._log(f"Deleted: {path}")
+        except Exception as exc:
+            logger.exception("Delete failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    def _op_defragment(self):
+        """Run full defragmentation."""
+        try:
+            self._log("Starting defragmentation…")
+            report = self.defragmenter.defragment_all()
+            self._unsaved_changes = True
+            self._update_all_panels()
+
+            summary = (
+                f"Defragmentation complete.\n\n"
+                f"Files processed: {report.get('files_processed', 0)}\n"
+                f"Blocks moved:    {report.get('total_blocks_moved', 0)}\n"
+                f"Time:            {report.get('time_taken', 0):.3f} s\n"
+                f"Before:          {report.get('initial_fragmentation_percentage', 0):.1f} %\n"
+                f"After:           {report.get('final_fragmentation_percentage', 0):.1f} %"
+            )
+            self._log("Defragmentation finished.")
+            messagebox.showinfo("Defragmentation", summary, parent=self.root)
+        except Exception as exc:
+            logger.exception("Defragmentation failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    # --------------------------------------------------------------------- #
+    #  Recovery menu handlers
+    # --------------------------------------------------------------------- #
+
+    def _rec_simulate_crash(self):
+        """Inject a random crash into the file system."""
+        try:
+            report = self.crash_sim.simulate_random_crash(
+                self.file_system_components)
+            self._unsaved_changes = True
+            self._update_all_panels()
+
+            desc = report.get("description", "Unknown crash")
+            sev = report.get("severity", "?")
+            self._log(f"Crash injected! [{sev}] {desc}")
+            messagebox.showwarning(
+                "Crash Simulated",
+                f"Type: {report.get('crash_type', '?')}\n"
+                f"Severity: {sev}\n"
+                f"Description: {desc}",
+                parent=self.root)
+        except Exception as exc:
+            logger.exception("Crash simulation failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    def _rec_recover(self):
+        """Attempt journal-based recovery."""
+        try:
+            self._log("Starting recovery…")
+            report = self.recovery_mgr.recover_from_journal()
+            self._update_all_panels()
+
+            ok = report.get("success", False)
+            tag = "✅" if ok else "❌"
+            self._log(f"Recovery {tag}: "
+                       f"{len(report.get('recovered_transactions', []))} redone, "
+                       f"{len(report.get('rolled_back_transactions', []))} undone")
+            messagebox.showinfo(
+                "Recovery",
+                f"Success: {ok}\n"
+                f"Recovered: {len(report.get('recovered_transactions', []))}\n"
+                f"Rolled back: {len(report.get('rolled_back_transactions', []))}\n"
+                f"Errors: {len(report.get('errors', []))}\n"
+                f"Time: {report.get('recovery_time', 0):.3f} s",
+                parent=self.root)
+        except Exception as exc:
+            logger.exception("Recovery failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    def _rec_fsck(self):
+        """Run file-system consistency check."""
+        try:
+            self._log("Running FSCK…")
+            report = self.recovery_mgr.perform_fsck(auto_repair=True)
+            self._update_all_panels()
+
+            issues = []
+            if report.get("blocks_marked_free_but_allocated"):
+                issues.append(f"Free-but-allocated: "
+                              f"{report['blocks_marked_free_but_allocated']}")
+            if report.get("blocks_marked_allocated_but_free"):
+                issues.append(f"Allocated-but-free: "
+                              f"{report['blocks_marked_allocated_but_free']}")
+            if report.get("orphaned_inodes"):
+                issues.append(f"Orphaned inodes: {report['orphaned_inodes']}")
+
+            status = "No issues found." if not issues else "\n".join(issues)
+            self._log(f"FSCK complete. {'Clean' if not issues else 'Issues found'}")
+            messagebox.showinfo("FSCK Results",
+                                f"Auto-repaired: {report.get('auto_repaired')}\n\n"
+                                f"{status}",
+                                parent=self.root)
+        except Exception as exc:
+            logger.exception("FSCK failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    # --------------------------------------------------------------------- #
+    #  Tools menu handlers
+    # --------------------------------------------------------------------- #
+
+    def _tool_benchmark(self):
+        """Run read/write benchmarks and display results."""
+        try:
+            self._log("Running benchmarks…")
+            read_r = self.perf_analyzer.benchmark_read_performance()
+            write_r = self.perf_analyzer.benchmark_write_performance()
+            self._update_all_panels()
+
+            lines = ["=== Read Benchmark ==="]
+            for sz, mbps in read_r.get("sequential_read_mbps", {}).items():
+                lines.append(f"  {sz:>10} B  →  {mbps:.1f} MB/s (seq)")
+            lines.append("\n=== Write Benchmark ===")
+            for sz, mbps in write_r.get("sequential_write_mbps", {}).items():
+                lines.append(f"  {sz:>10} B  →  {mbps:.1f} MB/s (seq)")
+
+            self._log("Benchmarks complete.")
+            messagebox.showinfo("Benchmark Results", "\n".join(lines),
+                                parent=self.root)
+        except Exception as exc:
+            logger.exception("Benchmark failed")
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    def _tool_clear_cache(self):
+        """Flush and clear the block cache."""
+        try:
+            self.cache.flush_dirty_blocks()
+            self.cache.clear_cache()
+            self._update_all_panels()
+            self._log("Cache cleared.")
+            messagebox.showinfo("Cache", "Block cache has been cleared.",
+                                parent=self.root)
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    def _tool_export_report(self):
+        """Export a performance report to a text file."""
+        path = filedialog.asksaveasfilename(
+            title="Export Report",
+            defaultextension=".txt",
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+            parent=self.root)
+        if not path:
+            return
+        try:
+            report = self.perf_analyzer.generate_performance_report("text")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(report)
+            self._log(f"Report exported to {path}")
+            messagebox.showinfo("Export", "Report saved.", parent=self.root)
+        except Exception as exc:
+            messagebox.showerror("Error", str(exc), parent=self.root)
+
+    # --------------------------------------------------------------------- #
+    #  Help menu
+    # --------------------------------------------------------------------- #
+
+    def _show_documentation(self):
+        """Show a brief documentation dialog."""
+        messagebox.showinfo(
+            "Documentation",
+            "File System Recovery & Optimization Tool\n\n"
+            "Use the Operations menu to create files/directories,\n"
+            "the Recovery menu to simulate & recover from crashes,\n"
+            "and the Tools menu to benchmark performance.\n\n"
+            "See README.md for full documentation.",
+            parent=self.root)
+
+    def _show_about_dialog(self):
+        """Show the About dialog."""
+        messagebox.showinfo(
+            "About",
+            "File System Recovery & Optimization Tool\n"
+            "─────────────────────────────────────────\n"
+            "Version 1.0\n\n"
+            "A simulated block-based file system with:\n"
+            "  • Disk, FAT, Inode, Directory Tree\n"
+            "  • Journal-based crash recovery\n"
+            "  • Defragmentation & caching\n"
+            "  • Performance analysis\n\n"
+            "Built with Python + Tkinter",
+            parent=self.root)
+
+    # --------------------------------------------------------------------- #
+    #  Main event loop
+    # --------------------------------------------------------------------- #
+
+    def run(self):
+        """Enter the Tkinter main event loop."""
         self.root.mainloop()
-
-
-# ===================================================================== #
-#  Entry point
-# ===================================================================== #
-
-def main():
-    """Launch the GUI application."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
-    app = MainWindow()
-    app.run()
-
-
-if __name__ == "__main__":
-    main()

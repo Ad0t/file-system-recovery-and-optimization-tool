@@ -1,950 +1,791 @@
 """
-tree_view.py - TreeView component for the File System Simulator GUI.
+tree_view.py — Reusable directory-tree widget for the File System Simulator.
 
-Provides a rich, interactive tree widget that visualises the simulated
-directory hierarchy.  Supports navigation, right-click context menus,
-file/directory creation and deletion, property inspection, and search.
-
-Dependencies:
-    - tkinter             : GUI framework
-    - src.core.directory  : DirectoryTree / DirectoryNode
-    - src.core.inode      : Inode (for file creation)
+Wraps a ``ttk.Treeview`` and binds it to a
+:class:`~src.core.directory.DirectoryTree` model so the user can
+browse, create, delete, and inspect files and directories interactively.
 
 Usage::
 
-    import tkinter as tk
-    from tkinter import ttk
-    from src.core.directory import DirectoryTree
     from src.ui.tree_view import TreeView
 
-    root = tk.Tk()
-    frame = ttk.Frame(root)
-    frame.pack(fill="both", expand=True)
-    tree_view = TreeView(frame, DirectoryTree())
-    root.mainloop()
+    tree_view = TreeView(parent_frame, directory_tree,
+                         fat=fat, fsm=fsm, disk=disk, journal=journal)
+    tree_view.refresh()
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
 import logging
+import tkinter as tk
 from datetime import datetime
-from typing import List, Optional, Callable, Dict, Any
+from tkinter import ttk, messagebox, simpledialog
+from typing import Callable, Dict, List, Optional
 
 from src.core.directory import DirectoryTree, DirectoryNode
+from src.core.file_allocation_table import FileAllocationTable
+from src.core.free_space import FreeSpaceManager
 from src.core.inode import Inode
 
 logger = logging.getLogger(__name__)
 
 
-# ===================================================================== #
-#  Color / Font constants  (mirrors main_window.py palette)
-# ===================================================================== #
+# =========================================================================== #
+#  Tooltip helper
+# =========================================================================== #
 
-COLORS = {
-    "bg_dark":        "#1a1a2e",
-    "bg_panel":       "#16213e",
-    "bg_card":        "#0f3460",
-    "accent_primary": "#e94560",
-    "accent_green":   "#00d2a0",
-    "accent_yellow":  "#f5c542",
-    "accent_blue":    "#4fc3f7",
-    "accent_orange":  "#ff8c42",
-    "text_primary":   "#e0e0e0",
-    "text_secondary": "#a0a0b0",
-    "text_header":    "#ffffff",
-    "border":         "#2a2a4a",
-    "highlight":      "#3a3a6a",
-}
+class _ToolTip:
+    """Minimal tooltip that follows the mouse on a Treeview row."""
 
-FONT_BODY    = ("Segoe UI", 10)
-FONT_SMALL   = ("Segoe UI", 9)
-FONT_SUBHEAD = ("Segoe UI", 11, "bold")
-FONT_MONO    = ("Consolas", 10)
-FONT_MONO_SM = ("Consolas", 9)
+    _DELAY_MS = 400
 
-# Visual icons
-ICON_DIR      = "📁"
-ICON_DIR_OPEN = "📂"
-ICON_FILE     = "📄"
-ICON_ROOT     = "🖥️"
+    def __init__(self, widget: tk.Widget):
+        self._widget = widget
+        self._tip_window: Optional[tk.Toplevel] = None
+        self._text = ""
+        self._after_id: Optional[str] = None
+
+        widget.bind("<Motion>", self._on_motion, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    # ------------------------------------------------------------------ #
+
+    def _on_motion(self, event: tk.Event):
+        """Schedule a tooltip for the row under the cursor."""
+        self._hide()
+        self._after_id = self._widget.after(self._DELAY_MS,
+                                             lambda: self._show(event))
+
+    def _show(self, event: tk.Event):
+        """Display the tooltip window."""
+        tree: ttk.Treeview = self._widget  # type: ignore[assignment]
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        values = tree.item(row_id, "values")
+        text_parts = [tree.item(row_id, "text")]
+        if values:
+            text_parts.append(f"Type: {values[0]}")
+            if len(values) > 1 and values[1]:
+                text_parts.append(f"Size: {values[1]}")
+            if len(values) > 2 and values[2]:
+                text_parts.append(f"Modified: {values[2]}")
+        tip_text = "\n".join(text_parts)
+
+        self._tip_window = tw = tk.Toplevel(self._widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{event.x_root + 18}+{event.y_root + 12}")
+        label = tk.Label(tw, text=tip_text, justify=tk.LEFT,
+                         background="#313244", foreground="#cdd6f4",
+                         relief=tk.SOLID, borderwidth=1,
+                         font=("Segoe UI", 9), padx=6, pady=4)
+        label.pack()
+
+    def _hide(self, _event=None):
+        """Destroy the tooltip window."""
+        if self._after_id:
+            self._widget.after_cancel(self._after_id)
+            self._after_id = None
+        if self._tip_window:
+            self._tip_window.destroy()
+            self._tip_window = None
 
 
-# ===================================================================== #
-#  TreeView Component
-# ===================================================================== #
+# =========================================================================== #
+#  TreeView
+# =========================================================================== #
 
 class TreeView:
     """
-    Interactive tree-view component backed by a DirectoryTree.
+    Interactive directory-tree component backed by ``ttk.Treeview``.
 
-    Attributes:
-        parent_frame (ttk.Frame): The container this widget lives in.
-        directory_tree (DirectoryTree): The underlying directory model.
-        tree_widget (ttk.Treeview): The Tkinter Treeview widget.
-        selected_path (str | None): Currently selected absolute path.
-        context_menu (tk.Menu): Right-click popup menu.
+    Attributes
+    ----------
+    parent_frame : ttk.Frame
+        The container this widget lives in.
+    directory_tree : DirectoryTree
+        The authoritative model for the file-system hierarchy.
+    tree_widget : ttk.Treeview
+        The underlying Tkinter treeview widget.
+    selected_path : str
+        The absolute path of the currently selected item (or ``""``).
+    context_menu : tk.Menu
+        Right-click context menu.
     """
 
-    # ----------------------------------------------------------------- #
+    # --------------------------------------------------------------------- #
     #  Construction
-    # ----------------------------------------------------------------- #
+    # --------------------------------------------------------------------- #
 
-    def __init__(
-        self,
-        parent_frame: ttk.Frame,
-        directory_tree: DirectoryTree,
-        *,
-        on_select_callback: Optional[Callable[[str], None]] = None,
-        inode_counter_start: int = 100,
-        fat: Any = None,
-        fsm: Any = None,
-        disk: Any = None,
-    ):
+    def __init__(self, parent_frame: ttk.Frame,
+                 directory_tree: DirectoryTree,
+                 *,
+                 fat: Optional[FileAllocationTable] = None,
+                 fsm: Optional[FreeSpaceManager] = None,
+                 disk=None,
+                 journal=None,
+                 on_select_callback: Optional[Callable] = None,
+                 on_change_callback: Optional[Callable] = None,
+                 inode_counter_ref: Optional[list] = None):
         """
-        Initialise the tree-view component.
+        Build the tree-view widget inside *parent_frame*.
 
-        Args:
-            parent_frame: Parent ttk.Frame to embed into.
-            directory_tree: DirectoryTree model to visualise.
-            on_select_callback: Optional callback invoked with the
-                selected path whenever the selection changes.
-            inode_counter_start: Starting inode number for newly created
-                files via the UI.
-            fat: Optional FileAllocationTable reference for showing
-                block allocation in properties.
-            fsm: Optional FreeSpaceManager reference.
-            disk: Optional Disk reference for block-size info.
+        Parameters
+        ----------
+        parent_frame : ttk.Frame
+            Container widget.
+        directory_tree : DirectoryTree
+            The directory model to visualise.
+        fat : FileAllocationTable, optional
+            For block-allocation display and file creation.
+        fsm : FreeSpaceManager, optional
+            For block allocation during file creation.
+        disk : Disk, optional
+            For block reads/writes during file creation.
+        journal : Journal, optional
+            For transaction logging.
+        on_select_callback : callable, optional
+            Called with ``(path: str)`` whenever the selection changes.
+        on_change_callback : callable, optional
+            Called (no args) after any mutation so the parent can refresh.
+        inode_counter_ref : list[int], optional
+            Single-element list used as a mutable shared counter for
+            inode numbering (e.g. ``[5]``).
         """
         self.parent_frame = parent_frame
         self.directory_tree = directory_tree
-        self.selected_path: Optional[str] = None
-        self._on_select_callback = on_select_callback
-        self._inode_counter = inode_counter_start
+        self.selected_path: str = ""
+        self._on_select = on_select_callback
+        self._on_change = on_change_callback
 
-        # Optional references for enriched properties display
+        # Optional FS components for file operations
         self._fat = fat
         self._fsm = fsm
         self._disk = disk
+        self._journal = journal
+        self._inode_counter_ref = inode_counter_ref or [1]
 
-        # Mapping: tree-widget item-id → DirectoryNode
-        self._item_to_node: Dict[str, DirectoryNode] = {}
-
-        # Search state
-        self._search_matches: List[str] = []
-
-        # ---------- Build UI ----------
-        self._build_toolbar()
-        self._build_treeview()
-        self._create_context_menu()
-        self._create_tooltip()
-
-        # Populate and select root
-        self.refresh()
-
-    # ----------------------------------------------------------------- #
-    #  Toolbar (search bar + refresh button)
-    # ----------------------------------------------------------------- #
-
-    def _build_toolbar(self) -> None:
-        """Build a search / toolbar strip above the tree."""
-        toolbar = tk.Frame(self.parent_frame, bg=COLORS["bg_dark"])
-        toolbar.pack(fill="x", padx=2, pady=(4, 0))
-
-        # Search
-        tk.Label(toolbar, text="🔍", bg=COLORS["bg_dark"],
-                 fg=COLORS["text_secondary"],
-                 font=FONT_BODY).pack(side="left", padx=(4, 0))
-
-        self._sv_search = tk.StringVar()
-        self._ent_search = tk.Entry(
-            toolbar, textvariable=self._sv_search,
-            bg=COLORS["bg_panel"], fg=COLORS["text_primary"],
-            insertbackground=COLORS["text_primary"],
-            font=FONT_SMALL, width=20, relief="flat",
-        )
-        self._ent_search.pack(side="left", padx=4, fill="x", expand=True)
-        self._ent_search.bind("<Return>", lambda _: self._do_search())
-
-        tk.Button(
-            toolbar, text="Search", font=FONT_SMALL,
-            bg=COLORS["bg_card"], fg=COLORS["accent_blue"],
-            relief="flat", cursor="hand2",
-            command=self._do_search,
-        ).pack(side="left", padx=2)
-
-        tk.Button(
-            toolbar, text="⟳", font=FONT_BODY,
-            bg=COLORS["bg_card"], fg=COLORS["accent_green"],
-            relief="flat", cursor="hand2", width=3,
-            command=self.refresh,
-        ).pack(side="right", padx=4)
-
-    # ----------------------------------------------------------------- #
-    #  Treeview widget
-    # ----------------------------------------------------------------- #
-
-    def _build_treeview(self) -> None:
-        """Create the ttk.Treeview with four data columns + scrollbars."""
-        container = tk.Frame(self.parent_frame, bg=COLORS["bg_dark"])
-        container.pack(fill="both", expand=True, padx=2, pady=2)
-
+        # ---- Build the treeview ----
         columns = ("type", "size", "modified")
         self.tree_widget = ttk.Treeview(
-            container,
+            parent_frame,
             columns=columns,
             show="tree headings",
             selectmode="browse",
         )
+        self.tree_widget.heading("#0", text="Name", anchor=tk.W)
+        self.tree_widget.heading("type", text="Type", anchor=tk.W)
+        self.tree_widget.heading("size", text="Size", anchor=tk.E)
+        self.tree_widget.heading("modified", text="Modified", anchor=tk.W)
 
-        # Column configuration
-        self.tree_widget.heading("#0", text="Name", anchor="w")
-        self.tree_widget.heading("type", text="Type", anchor="center")
-        self.tree_widget.heading("size", text="Size", anchor="e")
-        self.tree_widget.heading("modified", text="Modified", anchor="center")
-
-        self.tree_widget.column("#0", width=260, minwidth=150, stretch=True)
-        self.tree_widget.column("type", width=80, minwidth=60, anchor="center")
-        self.tree_widget.column("size", width=90, minwidth=60, anchor="e")
-        self.tree_widget.column("modified", width=140, minwidth=100, anchor="center")
+        self.tree_widget.column("#0", width=220, minwidth=120, stretch=True)
+        self.tree_widget.column("type", width=80, minwidth=50, stretch=False)
+        self.tree_widget.column("size", width=80, minwidth=50,
+                                stretch=False, anchor=tk.E)
+        self.tree_widget.column("modified", width=130, minwidth=80,
+                                stretch=False)
 
         # Scrollbars
-        vsb = ttk.Scrollbar(container, orient="vertical",
-                             command=self.tree_widget.yview)
-        hsb = ttk.Scrollbar(container, orient="horizontal",
-                             command=self.tree_widget.xview)
-        self.tree_widget.configure(yscrollcommand=vsb.set,
-                                    xscrollcommand=hsb.set)
+        v_scroll = ttk.Scrollbar(parent_frame, orient=tk.VERTICAL,
+                                  command=self.tree_widget.yview)
+        h_scroll = ttk.Scrollbar(parent_frame, orient=tk.HORIZONTAL,
+                                  command=self.tree_widget.xview)
+        self.tree_widget.configure(yscrollcommand=v_scroll.set,
+                                    xscrollcommand=h_scroll.set)
 
         # Grid layout
         self.tree_widget.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        container.rowconfigure(0, weight=1)
-        container.columnconfigure(0, weight=1)
+        v_scroll.grid(row=0, column=1, sticky="ns")
+        h_scroll.grid(row=1, column=0, sticky="ew")
+        parent_frame.grid_rowconfigure(0, weight=1)
+        parent_frame.grid_columnconfigure(0, weight=1)
 
-        # Tag-based colouring
-        self.tree_widget.tag_configure(
-            "directory", foreground=COLORS["accent_blue"])
-        self.tree_widget.tag_configure(
-            "file", foreground=COLORS["text_primary"])
-        self.tree_widget.tag_configure(
-            "search_match", background=COLORS["highlight"])
+        # ---- Context menu ----
+        self.context_menu = self._create_context_menu()
 
-        # Event bindings
+        # ---- Tooltip ----
+        _ToolTip(self.tree_widget)
+
+        # ---- Bind events ----
         self.tree_widget.bind("<<TreeviewSelect>>", self.on_select)
         self.tree_widget.bind("<Double-1>", self.on_double_click)
+
+        # Right-click (platform-aware)
         self.tree_widget.bind("<Button-3>", self.on_right_click)
-        self.tree_widget.bind("<Motion>", self._on_motion)
+        self.tree_widget.bind("<Button-2>", self.on_right_click)  # macOS
 
-    # ----------------------------------------------------------------- #
-    #  Context menu
-    # ----------------------------------------------------------------- #
+        # ---- Populate ----
+        self.populate_tree()
 
-    def _create_context_menu(self) -> None:
-        """Build the right-click popup menu."""
-        self.context_menu = tk.Menu(
-            self.parent_frame, tearoff=0,
-            bg=COLORS["bg_panel"], fg=COLORS["text_primary"],
-            activebackground=COLORS["bg_card"],
-            activeforeground=COLORS["text_header"],
-            font=FONT_SMALL,
-        )
+    # --------------------------------------------------------------------- #
+    #  Population
+    # --------------------------------------------------------------------- #
 
-        # Items are shown / hidden dynamically in on_right_click()
-        self.context_menu.add_command(
-            label=f"{ICON_FILE}  Create File",
-            command=self.create_file_dialog)
-        self.context_menu.add_command(
-            label=f"{ICON_DIR}  Create Directory",
-            command=self.create_directory_dialog)
-        self.context_menu.add_separator()
-        self.context_menu.add_command(
-            label="🗑️  Delete",
-            command=self.delete_item)
-        self.context_menu.add_separator()
-        self.context_menu.add_command(
-            label="ℹ️  Properties",
-            command=lambda: self.show_properties(self.selected_path))
-        self.context_menu.add_command(
-            label="👁️  View Content",
-            command=self._view_file_content)
-
-    # ----------------------------------------------------------------- #
-    #  Tooltip (hover info)
-    # ----------------------------------------------------------------- #
-
-    def _create_tooltip(self) -> None:
-        """Create a floating tooltip label (hidden by default)."""
-        self._tooltip = tk.Toplevel(self.parent_frame)
-        self._tooltip.withdraw()
-        self._tooltip.overrideredirect(True)
-        self._tooltip_label = tk.Label(
-            self._tooltip,
-            bg=COLORS["bg_card"], fg=COLORS["text_primary"],
-            font=FONT_SMALL, justify="left",
-            padx=8, pady=4, wraplength=320,
-        )
-        self._tooltip_label.pack()
-
-    def _on_motion(self, event: tk.Event) -> None:
-        """Show a tooltip with extra info when hovering over a tree item."""
-        item_id = self.tree_widget.identify_row(event.y)
-        if not item_id or item_id not in self._item_to_node:
-            self._tooltip.withdraw()
-            return
-
-        node = self._item_to_node[item_id]
-        path = node.get_full_path()
-        tip_lines = [f"Path: {path}"]
-        if node.inode:
-            tip_lines.append(f"Inode: #{node.inode.inode_number}")
-            tip_lines.append(f"Permissions: {node.inode.permissions}")
-            tip_lines.append(f"Owner: {node.inode.owner}")
-        tip_lines.append(f"Created: {self._format_date(node.created_time)}")
-        tip_text = "\n".join(tip_lines)
-
-        self._tooltip_label.configure(text=tip_text)
-        x = event.x_root + 16
-        y = event.y_root + 12
-        self._tooltip.geometry(f"+{x}+{y}")
-        self._tooltip.deiconify()
-
-    # ================================================================= #
-    #  Tree population
-    # ================================================================= #
-
-    def populate_tree(
-        self,
-        parent_item: str = "",
-        parent_node: Optional[DirectoryNode] = None,
-    ) -> None:
+    def populate_tree(self, parent_item: str = "",
+                      parent_node: Optional[DirectoryNode] = None):
         """
-        Recursively populate the treeview widget from the directory model.
+        Recursively populate the treeview from the directory model.
 
-        Args:
-            parent_item: Treeview item-id for the visual parent.
-            parent_node: DirectoryNode to start from (root if None).
+        Parameters
+        ----------
+        parent_item : str
+            Internal treeview item ID of the parent row (``""`` for root).
+        parent_node : DirectoryNode or None
+            Starting node; defaults to the tree root.
         """
         if parent_node is None:
             parent_node = self.directory_tree.root
 
-        # Sort children: directories first, then files, both alphabetical
-        children = sorted(
-            parent_node.children.values(),
-            key=lambda n: (not n.is_directory, n.name.lower()),
-        )
+        for child_name in sorted(parent_node.children.keys()):
+            child = parent_node.children[child_name]
+            icon = "📁" if child.is_directory else "📄"
+            kind = "Directory" if child.is_directory else "File"
 
-        for child in children:
-            icon = ICON_DIR if child.is_directory else ICON_FILE
-            node_type = "Directory" if child.is_directory else "File"
+            # Size
             size_str = ""
-            modified_str = ""
-            tag = "directory" if child.is_directory else "file"
-
-            if child.inode is not None:
+            if not child.is_directory and child.inode is not None:
                 size_str = self._format_size(child.inode.size_bytes)
-                modified_str = self._format_date(child.inode.modified_time)
-            elif child.is_directory:
-                size_str = f"{len(child.children)} items"
-                modified_str = self._format_date(child.created_time)
+
+            # Modified time
+            mod_str = ""
+            if child.inode is not None:
+                mod_str = self._format_date(child.inode.modified_time)
             else:
-                modified_str = self._format_date(child.created_time)
+                mod_str = self._format_date(child.created_time)
 
-            item_id = self.tree_widget.insert(
-                parent_item, "end",
-                text=f" {icon}  {child.name}",
-                values=(node_type, size_str, modified_str),
-                open=False,
-                tags=(tag,),
+            iid = self.tree_widget.insert(
+                parent_item, tk.END,
+                text=f"{icon} {child_name}",
+                values=(kind, size_str, mod_str),
+                open=child.is_directory,
             )
-            self._item_to_node[item_id] = child
 
-            # Recurse into directories
-            if child.is_directory and child.children:
-                self.populate_tree(parent_item=item_id, parent_node=child)
+            if child.is_directory:
+                self.populate_tree(parent_item=iid, parent_node=child)
 
-    def refresh(self) -> None:
-        """Clear and rebuild the tree, restoring the previous selection."""
-        prev_path = self.selected_path
+    # --------------------------------------------------------------------- #
+    #  Refresh
+    # --------------------------------------------------------------------- #
 
-        # Clear existing items
+    def refresh(self):
+        """Clear and re-populate the tree, restoring selection if possible."""
+        saved_path = self.selected_path
+
         self.tree_widget.delete(*self.tree_widget.get_children())
-        self._item_to_node.clear()
+        self.populate_tree()
 
-        # Insert root node
-        root = self.directory_tree.root
-        root_id = self.tree_widget.insert(
-            "", "end",
-            text=f" {ICON_ROOT}  / (root)",
-            values=("Root", f"{len(root.children)} items",
-                    self._format_date(root.created_time)),
-            open=True,
-            tags=("directory",),
-        )
-        self._item_to_node[root_id] = root
+        if saved_path:
+            self.expand_to_path(saved_path)
 
-        # Populate children
-        self.populate_tree(parent_item=root_id, parent_node=root)
-
-        # Try to restore selection
-        if prev_path:
-            self.expand_to_path(prev_path)
-
-    # ================================================================= #
+    # --------------------------------------------------------------------- #
     #  Event handlers
-    # ================================================================= #
+    # --------------------------------------------------------------------- #
 
-    def on_select(self, event: tk.Event) -> None:
-        """Handle item selection in the tree."""
-        selection = self.tree_widget.selection()
-        if not selection:
-            self.selected_path = None
+    def on_select(self, event):
+        """Handle item selection — update ``selected_path`` and fire callback."""
+        sel = self.tree_widget.selection()
+        if not sel:
+            self.selected_path = ""
             return
+        item_id = sel[0]
+        self.selected_path = self._get_item_path(item_id)
+        if self._on_select:
+            self._on_select(self.selected_path)
 
-        item_id = selection[0]
-        node = self._item_to_node.get(item_id)
-        if node:
-            self.selected_path = node.get_full_path()
-            if self._on_select_callback:
-                self._on_select_callback(self.selected_path)
+    def on_double_click(self, event):
+        """
+        Handle double-click.
 
-    def on_double_click(self, event: tk.Event) -> None:
-        """Handle double-click: toggle directory or show file properties."""
+        * Directory → toggle expand / collapse
+        * File     → show properties dialog
+        """
         item_id = self.tree_widget.identify_row(event.y)
         if not item_id:
             return
 
-        node = self._item_to_node.get(item_id)
-        if node is None:
+        values = self.tree_widget.item(item_id, "values")
+        if not values:
             return
 
-        if node.is_directory:
-            # Toggle open/close
+        kind = values[0]
+        if kind == "Directory":
+            # Toggle open state
             is_open = self.tree_widget.item(item_id, "open")
             self.tree_widget.item(item_id, open=not is_open)
         else:
-            # Show properties for files
-            self.show_properties(node.get_full_path())
+            path = self._get_item_path(item_id)
+            self.show_properties(path)
 
-    def on_right_click(self, event: tk.Event) -> None:
-        """Show the context menu, adjusting options for item type."""
-        # Select the item under cursor
+    def on_right_click(self, event):
+        """Show the context menu at the cursor position."""
         item_id = self.tree_widget.identify_row(event.y)
         if item_id:
             self.tree_widget.selection_set(item_id)
-            self.tree_widget.focus(item_id)
-
-        node = self._item_to_node.get(item_id) if item_id else None
-
-        # Show / hide menu entries based on node type
-        #  0 = Create File, 1 = Create Dir, 2 = separator,
-        #  3 = Delete, 4 = separator, 5 = Properties, 6 = View Content
-        is_dir = node.is_directory if node else True
-        is_root = (node is self.directory_tree.root) if node else False
-
-        self.context_menu.entryconfigure(0, state="normal" if is_dir else "disabled")
-        self.context_menu.entryconfigure(1, state="normal" if is_dir else "disabled")
-        self.context_menu.entryconfigure(3, state="disabled" if is_root else "normal")
-        self.context_menu.entryconfigure(6, state="normal" if not is_dir else "disabled")
-
+            self.selected_path = self._get_item_path(item_id)
+        self._update_context_menu()
         try:
-            self.context_menu.tk_popup(event.x_root, event.y_root)
+            self.context_menu.tk_popup(event.x_root, event.y_root, 0)
         finally:
             self.context_menu.grab_release()
 
-    # ================================================================= #
-    #  File / directory creation dialogs
-    # ================================================================= #
+    # --------------------------------------------------------------------- #
+    #  Context menu
+    # --------------------------------------------------------------------- #
 
-    def create_file_dialog(self) -> None:
-        """Open a dialog to create a new file in the selected directory."""
-        parent_path = self.selected_path or "/"
-        parent_node = self.directory_tree.resolve_path(parent_path)
-        if parent_node is None or not parent_node.is_directory:
-            messagebox.showwarning("Invalid Target",
-                                   "Please select a directory first.")
-            return
+    def _create_context_menu(self) -> tk.Menu:
+        """Build the right-click context menu."""
+        root_widget = self.parent_frame.winfo_toplevel()
 
-        # Build a small dialog
-        dialog = tk.Toplevel(self.parent_frame)
-        dialog.title("Create File")
-        dialog.geometry("360x200")
-        dialog.configure(bg=COLORS["bg_dark"])
-        dialog.resizable(False, False)
-        dialog.transient(self.parent_frame.winfo_toplevel())
-        dialog.grab_set()
+        menu_kw = dict(tearoff=0)
+        # Try to pick up the parent's palette colours
+        try:
+            bg = root_widget.cget("bg")
+            menu_kw.update(bg="#313244", fg="#cdd6f4",
+                           activebackground="#89b4fa",
+                           activeforeground="#1e1e2e")
+        except tk.TclError:
+            pass
 
-        tk.Label(dialog, text="Create New File",
-                 bg=COLORS["bg_dark"], fg=COLORS["text_header"],
-                 font=FONT_SUBHEAD).pack(pady=(12, 6))
+        menu = tk.Menu(root_widget, **menu_kw)
 
-        form = tk.Frame(dialog, bg=COLORS["bg_dark"])
-        form.pack(padx=20, fill="x")
+        menu.add_command(label="📄 Create File…",
+                         command=self.create_file_dialog)
+        menu.add_command(label="📁 Create Directory…",
+                         command=self.create_directory_dialog)
+        menu.add_separator()
+        menu.add_command(label="🗑  Delete", command=self.delete_item)
+        menu.add_separator()
+        menu.add_command(label="ℹ  Properties…",
+                         command=lambda: self.show_properties(self.selected_path))
+        menu.add_command(label="👁  View Content",
+                         command=self._view_content)
+        return menu
 
-        tk.Label(form, text="Filename:", bg=COLORS["bg_dark"],
-                 fg=COLORS["text_primary"], font=FONT_BODY
-                 ).grid(row=0, column=0, sticky="w", pady=4)
-        ent_name = tk.Entry(form, bg=COLORS["bg_panel"],
-                            fg=COLORS["text_primary"],
-                            insertbackground=COLORS["text_primary"],
-                            font=FONT_BODY, width=24)
-        ent_name.grid(row=0, column=1, padx=6, pady=4)
-        ent_name.focus_set()
-
-        tk.Label(form, text="Size (bytes):", bg=COLORS["bg_dark"],
-                 fg=COLORS["text_primary"], font=FONT_BODY
-                 ).grid(row=1, column=0, sticky="w", pady=4)
-        ent_size = tk.Entry(form, bg=COLORS["bg_panel"],
-                            fg=COLORS["text_primary"],
-                            insertbackground=COLORS["text_primary"],
-                            font=FONT_BODY, width=24)
-        ent_size.insert(0, "1024")
-        ent_size.grid(row=1, column=1, padx=6, pady=4)
-
-        def _do_create():
-            name = ent_name.get().strip()
-            if not name:
-                messagebox.showwarning("Missing Name",
-                                       "Please enter a filename.",
-                                       parent=dialog)
-                return
-            try:
-                size = int(ent_size.get())
-            except ValueError:
-                messagebox.showwarning("Invalid Size",
-                                       "Size must be a positive integer.",
-                                       parent=dialog)
-                return
-
-            inode = Inode(
-                inode_number=self._inode_counter,
-                file_type="file",
-                size=max(size, 0),
-            )
-            self._inode_counter += 1
-
-            full_path = parent_path.rstrip("/") + "/" + name
-            if self.directory_tree.create_file(full_path, inode):
-                self.refresh()
-                dialog.destroy()
-            else:
-                messagebox.showerror(
-                    "Creation Failed",
-                    f"Could not create '{full_path}'.\n"
-                    "The name may already exist or be invalid.",
-                    parent=dialog,
-                )
-
-        btn_bar = tk.Frame(dialog, bg=COLORS["bg_dark"])
-        btn_bar.pack(pady=12)
-        tk.Button(btn_bar, text="Create", bg=COLORS["accent_green"],
-                  fg="#000", font=FONT_BODY, width=10, relief="flat",
-                  cursor="hand2", command=_do_create).pack(side="left", padx=6)
-        tk.Button(btn_bar, text="Cancel", bg=COLORS["bg_card"],
-                  fg=COLORS["text_primary"], font=FONT_BODY,
-                  width=10, relief="flat", cursor="hand2",
-                  command=dialog.destroy).pack(side="left", padx=6)
-
-    def create_directory_dialog(self) -> None:
-        """Open a dialog to create a new sub-directory."""
-        parent_path = self.selected_path or "/"
-        parent_node = self.directory_tree.resolve_path(parent_path)
-        if parent_node is None or not parent_node.is_directory:
-            messagebox.showwarning("Invalid Target",
-                                   "Please select a directory first.")
-            return
-
-        dialog = tk.Toplevel(self.parent_frame)
-        dialog.title("Create Directory")
-        dialog.geometry("340x150")
-        dialog.configure(bg=COLORS["bg_dark"])
-        dialog.resizable(False, False)
-        dialog.transient(self.parent_frame.winfo_toplevel())
-        dialog.grab_set()
-
-        tk.Label(dialog, text="Create New Directory",
-                 bg=COLORS["bg_dark"], fg=COLORS["text_header"],
-                 font=FONT_SUBHEAD).pack(pady=(12, 6))
-
-        form = tk.Frame(dialog, bg=COLORS["bg_dark"])
-        form.pack(padx=20, fill="x")
-
-        tk.Label(form, text="Directory name:", bg=COLORS["bg_dark"],
-                 fg=COLORS["text_primary"], font=FONT_BODY
-                 ).grid(row=0, column=0, sticky="w", pady=4)
-        ent_name = tk.Entry(form, bg=COLORS["bg_panel"],
-                            fg=COLORS["text_primary"],
-                            insertbackground=COLORS["text_primary"],
-                            font=FONT_BODY, width=22)
-        ent_name.grid(row=0, column=1, padx=6, pady=4)
-        ent_name.focus_set()
-
-        def _do_create():
-            name = ent_name.get().strip()
-            if not name:
-                messagebox.showwarning("Missing Name",
-                                       "Please enter a directory name.",
-                                       parent=dialog)
-                return
-
-            full_path = parent_path.rstrip("/") + "/" + name
-            if self.directory_tree.create_directory(full_path):
-                self.refresh()
-                dialog.destroy()
-            else:
-                messagebox.showerror(
-                    "Creation Failed",
-                    f"Could not create directory '{full_path}'.",
-                    parent=dialog,
-                )
-
-        btn_bar = tk.Frame(dialog, bg=COLORS["bg_dark"])
-        btn_bar.pack(pady=12)
-        tk.Button(btn_bar, text="Create", bg=COLORS["accent_green"],
-                  fg="#000", font=FONT_BODY, width=10, relief="flat",
-                  cursor="hand2", command=_do_create).pack(side="left", padx=6)
-        tk.Button(btn_bar, text="Cancel", bg=COLORS["bg_card"],
-                  fg=COLORS["text_primary"], font=FONT_BODY,
-                  width=10, relief="flat", cursor="hand2",
-                  command=dialog.destroy).pack(side="left", padx=6)
-
-    # ================================================================= #
-    #  Deletion
-    # ================================================================= #
-
-    def delete_item(self) -> None:
-        """Delete the currently selected file or directory."""
-        if not self.selected_path or self.selected_path == "/":
-            messagebox.showinfo("Cannot Delete",
-                                "Select a file or directory to delete.\n"
-                                "The root directory cannot be deleted.")
-            return
-
+    def _update_context_menu(self):
+        """Enable / disable menu items depending on the selection type."""
         node = self.directory_tree.resolve_path(self.selected_path)
-        if node is None:
-            messagebox.showwarning("Not Found",
-                                   f"'{self.selected_path}' not found.")
-            return
+        is_dir = node.is_directory if node else True
 
-        kind = "directory" if node.is_directory else "file"
-        extra = ""
-        if node.is_directory and node.children:
-            extra = f"\n\nThis directory contains {len(node.children)} item(s).\nAll contents will be deleted."
+        # "View Content" only for files
+        try:
+            self.context_menu.entryconfigure("👁  View Content",
+                                              state=tk.NORMAL if not is_dir
+                                              else tk.DISABLED)
+        except tk.TclError:
+            pass
 
-        confirmed = messagebox.askyesno(
-            "Confirm Deletion",
-            f"Delete {kind} '{self.selected_path}'?{extra}",
-        )
-        if not confirmed:
-            return
+    # --------------------------------------------------------------------- #
+    #  Create file
+    # --------------------------------------------------------------------- #
 
-        success = self.directory_tree.delete(self.selected_path, recursive=True)
-        if success:
-            self.selected_path = None
+    def create_file_dialog(self):
+        """Prompt the user for a filename and block count, then create it."""
+        root_w = self.parent_frame.winfo_toplevel()
+        try:
+            # Use selected directory as base or fall back to "/"
+            base = self.selected_path or "/"
+            node = self.directory_tree.resolve_path(base)
+            if node and not node.is_directory:
+                # User selected a file — go to its parent
+                base = base.rsplit("/", 1)[0] or "/"
+
+            filename = simpledialog.askstring(
+                "Create File",
+                f"File name (relative to {base}):",
+                parent=root_w)
+            if not filename:
+                return
+
+            num_blocks = simpledialog.askinteger(
+                "Create File", "Number of blocks:", parent=root_w,
+                initialvalue=2, minvalue=1, maxvalue=100)
+            if num_blocks is None:
+                return
+
+            full_path = f"{base.rstrip('/')}/{filename}"
+
+            # Allocate blocks if FSM is available
+            blocks: list = []
+            if self._fsm is not None:
+                blocks = self._fsm.allocate_blocks(num_blocks,
+                                                    contiguous=False) or []
+                if not blocks:
+                    messagebox.showwarning("Allocation Failed",
+                                           "Not enough free space.",
+                                           parent=root_w)
+                    return
+
+            # Build inode
+            inode_num = self._inode_counter_ref[0]
+            block_size = getattr(self._disk, "block_size", 4096)
+            inode = Inode(inode_number=inode_num, file_type="file",
+                          size=num_blocks * block_size)
+
+            # Ensure parent directories exist
+            parent_dir = full_path.rsplit("/", 1)[0] or "/"
+            self.directory_tree.create_directory(parent_dir)
+
+            if not self.directory_tree.create_file(full_path, inode):
+                messagebox.showwarning("Create File",
+                                       f"Could not create '{full_path}'.",
+                                       parent=root_w)
+                return
+
+            # FAT allocation
+            if self._fat is not None and blocks:
+                self._fat.allocate(inode_num, blocks)
+
+            # Write placeholder data
+            if self._disk is not None:
+                for b in blocks:
+                    self._disk.write_block(
+                        b,
+                        f"DATA_{inode_num}".encode().ljust(block_size, b"\x00"))
+
+            # Journal
+            if self._journal is not None:
+                txn = self._journal.begin_transaction(
+                    "CREATE",
+                    {"path": full_path, "inode": inode_num, "blocks": blocks})
+                self._journal.commit_transaction(txn)
+
+            self._inode_counter_ref[0] += 1
             self.refresh()
-        else:
-            messagebox.showerror("Deletion Failed",
-                                 f"Could not delete '{self.selected_path}'.")
+            self._fire_change()
+            logger.info("TreeView: created file %s", full_path)
 
-    # ================================================================= #
-    #  Properties dialog
-    # ================================================================= #
+        except Exception as exc:
+            logger.exception("create_file_dialog failed")
+            messagebox.showerror("Error", str(exc),
+                                 parent=root_w)
 
-    def show_properties(self, path: str) -> None:
-        """
-        Show a properties dialog for the item at *path*.
+    # --------------------------------------------------------------------- #
+    #  Create directory
+    # --------------------------------------------------------------------- #
 
-        Displays: path, type, size, timestamps, inode info, and
-        block allocation (if FAT is available).
-        """
-        if not path:
-            messagebox.showinfo("No Selection", "Select an item first.")
+    def create_directory_dialog(self):
+        """Prompt the user for a directory name and create it."""
+        root_w = self.parent_frame.winfo_toplevel()
+        try:
+            base = self.selected_path or "/"
+            node = self.directory_tree.resolve_path(base)
+            if node and not node.is_directory:
+                base = base.rsplit("/", 1)[0] or "/"
+
+            dirname = simpledialog.askstring(
+                "Create Directory",
+                f"Directory name (relative to {base}):",
+                parent=root_w)
+            if not dirname:
+                return
+
+            full_path = f"{base.rstrip('/')}/{dirname}"
+
+            if not self.directory_tree.create_directory(full_path):
+                messagebox.showwarning("Create Directory",
+                                       f"Could not create '{full_path}'.",
+                                       parent=root_w)
+                return
+
+            # Journal
+            if self._journal is not None:
+                txn = self._journal.begin_transaction(
+                    "MKDIR", {"path": full_path})
+                self._journal.commit_transaction(txn)
+
+            self.refresh()
+            self._fire_change()
+            logger.info("TreeView: created directory %s", full_path)
+
+        except Exception as exc:
+            logger.exception("create_directory_dialog failed")
+            messagebox.showerror("Error", str(exc), parent=root_w)
+
+    # --------------------------------------------------------------------- #
+    #  Delete
+    # --------------------------------------------------------------------- #
+
+    def delete_item(self):
+        """Delete the currently selected file or directory after confirmation."""
+        root_w = self.parent_frame.winfo_toplevel()
+        path = self.selected_path
+        if not path or path == "/":
+            messagebox.showwarning("Delete",
+                                   "Cannot delete root directory.",
+                                   parent=root_w)
             return
 
         node = self.directory_tree.resolve_path(path)
         if node is None:
-            messagebox.showwarning("Not Found", f"'{path}' not found.")
+            messagebox.showwarning("Delete",
+                                   f"'{path}' not found.",
+                                   parent=root_w)
             return
 
-        dialog = tk.Toplevel(self.parent_frame)
-        dialog.title(f"Properties — {node.name}")
-        dialog.geometry("440x450")
-        dialog.configure(bg=COLORS["bg_dark"])
-        dialog.resizable(False, True)
-        dialog.transient(self.parent_frame.winfo_toplevel())
+        kind = "directory" if node.is_directory else "file"
+        if not messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete {kind} '{path}'?",
+                parent=root_w):
+            return
 
-        # Header
-        icon = ICON_DIR if node.is_directory else ICON_FILE
-        tk.Label(dialog,
-                 text=f"  {icon}  {node.name}",
-                 bg=COLORS["bg_panel"], fg=COLORS["text_header"],
-                 font=("Segoe UI", 14, "bold"),
-                 anchor="w", padx=12, pady=10,
-                 ).pack(fill="x")
+        try:
+            # Free blocks
+            if node.inode is not None and self._fat is not None:
+                freed = self._fat.deallocate(node.inode.inode_number)
+                if freed and self._fsm is not None:
+                    self._fsm.deallocate_blocks(freed)
 
-        # Properties text
-        txt = tk.Text(
-            dialog, wrap="word",
-            bg=COLORS["bg_dark"], fg=COLORS["text_primary"],
-            font=FONT_MONO, relief="flat",
-            insertbackground=COLORS["text_primary"],
-            padx=14, pady=10,
-        )
-        txt.pack(fill="both", expand=True)
+            self.directory_tree.delete(path, recursive=True)
 
-        props = []
-        props.append(f"  Path:        {path}")
-        props.append(f"  Type:        {'Directory' if node.is_directory else 'File'}")
-        props.append(f"  Created:     {self._format_date(node.created_time)}")
+            # Journal
+            if self._journal is not None:
+                txn = self._journal.begin_transaction(
+                    "DELETE", {"path": path})
+                self._journal.commit_transaction(txn)
 
-        if node.inode:
+            self.selected_path = ""
+            self.refresh()
+            self._fire_change()
+            logger.info("TreeView: deleted %s", path)
+
+        except Exception as exc:
+            logger.exception("delete_item failed")
+            messagebox.showerror("Error", str(exc), parent=root_w)
+
+    # --------------------------------------------------------------------- #
+    #  Properties dialog
+    # --------------------------------------------------------------------- #
+
+    def show_properties(self, path: str):
+        """
+        Display a properties dialog for the item at *path*.
+
+        Shows: path, type, size, created / modified times, inode number,
+        and block allocation.
+        """
+        root_w = self.parent_frame.winfo_toplevel()
+        if not path:
+            return
+
+        node = self.directory_tree.resolve_path(path)
+        if node is None:
+            messagebox.showwarning("Properties",
+                                   f"'{path}' not found.",
+                                   parent=root_w)
+            return
+
+        kind = "Directory" if node.is_directory else "File"
+        lines = [
+            f"Path:           {path}",
+            f"Type:           {kind}",
+        ]
+
+        if node.inode is not None:
             ino = node.inode
-            props.append(f"  Inode #:     {ino.inode_number}")
-            props.append(f"  Size:        {self._format_size(ino.size_bytes)} ({ino.size_bytes:,} bytes)")
-            props.append(f"  Blocks:      {ino.block_count}")
-            props.append(f"  Modified:    {self._format_date(ino.modified_time)}")
-            props.append(f"  Accessed:    {self._format_date(ino.accessed_time)}")
-            props.append(f"  Permissions: {ino.permissions}")
-            props.append(f"  Owner:       {ino.owner}")
-            props.append(f"  Link Count:  {ino.link_count}")
+            lines.extend([
+                f"Inode number:   {ino.inode_number}",
+                f"Size:           {self._format_size(ino.size_bytes)}"
+                f" ({ino.size_bytes:,} bytes)",
+                f"Block count:    {ino.block_count}",
+                f"Permissions:    {ino.permissions}",
+                f"Owner:          {ino.owner}",
+                f"",
+                f"Created:        {self._format_date(ino.created_time)}",
+                f"Modified:       {self._format_date(ino.modified_time)}",
+                f"Accessed:       {self._format_date(ino.accessed_time)}",
+            ])
 
-            # Block allocation from FAT
-            if self._fat and hasattr(self._fat, "file_to_blocks"):
-                alloc = self._fat.file_to_blocks.get(ino.inode_number)
-                if alloc is not None:
-                    props.append(f"")
-                    props.append(f"  ── Block Allocation ──")
-                    props.append(f"  Allocated:   {alloc}")
-                    fragmented = self._fat.is_fragmented(ino.inode_number)
-                    props.append(f"  Fragmented:  {'Yes' if fragmented else 'No'}")
-
-            # Direct pointers
-            if ino.direct_pointers:
-                props.append(f"")
-                props.append(f"  ── Inode Pointers ──")
-                props.append(f"  Direct:      {ino.direct_pointers}")
-                if ino.single_indirect is not None:
-                    props.append(f"  Single Ind.: {ino.single_indirect}")
-                if ino.double_indirect is not None:
-                    props.append(f"  Double Ind.: {ino.double_indirect}")
+            # Block allocation
+            if self._fat is not None:
+                blocks = self._fat.get_file_blocks(ino.inode_number)
+                if blocks:
+                    block_str = ", ".join(str(b) for b in blocks[:20])
+                    if len(blocks) > 20:
+                        block_str += f" … (+{len(blocks) - 20} more)"
+                    lines.append(f"")
+                    lines.append(f"Blocks [{len(blocks)}]:  {block_str}")
         else:
+            lines.extend([
+                f"Created:        {self._format_date(node.created_time)}",
+            ])
             if node.is_directory:
-                props.append(f"  Contents:    {len(node.children)} item(s)")
-                props.append(f"  (No inode assigned)")
+                lines.append(
+                    f"Children:       {len(node.children)}")
 
-        txt.insert("1.0", "\n".join(props))
-        txt.configure(state="disabled")
+        messagebox.showinfo(f"Properties — {node.name}",
+                            "\n".join(lines),
+                            parent=root_w)
 
-        tk.Button(dialog, text="Close", bg=COLORS["bg_card"],
-                  fg=COLORS["text_primary"], font=FONT_BODY,
-                  width=10, relief="flat", cursor="hand2",
-                  command=dialog.destroy).pack(pady=10)
+    # --------------------------------------------------------------------- #
+    #  View content (files only)
+    # --------------------------------------------------------------------- #
 
-    # ================================================================= #
-    #  View file content (placeholder visual)
-    # ================================================================= #
-
-    def _view_file_content(self) -> None:
-        """Show simulated file content for the selected file."""
-        if not self.selected_path:
+    def _view_content(self):
+        """Read and display blocked content from disk for the selected file."""
+        root_w = self.parent_frame.winfo_toplevel()
+        path = self.selected_path
+        if not path:
             return
 
-        node = self.directory_tree.resolve_path(self.selected_path)
-        if node is None or node.is_directory:
-            messagebox.showinfo("Info", "Select a file to view content.")
+        node = self.directory_tree.resolve_path(path)
+        if node is None or node.is_directory or node.inode is None:
+            messagebox.showinfo("View Content",
+                                "No content to display.",
+                                parent=root_w)
             return
 
-        dialog = tk.Toplevel(self.parent_frame)
-        dialog.title(f"Content — {node.name}")
-        dialog.geometry("480x300")
-        dialog.configure(bg=COLORS["bg_dark"])
-        dialog.transient(self.parent_frame.winfo_toplevel())
+        if self._fat is None or self._disk is None:
+            messagebox.showinfo("View Content",
+                                "Disk/FAT not available.",
+                                parent=root_w)
+            return
 
-        tk.Label(dialog, text=f"  {ICON_FILE}  {node.name}",
-                 bg=COLORS["bg_panel"], fg=COLORS["text_header"],
-                 font=FONT_SUBHEAD, anchor="w", padx=12, pady=8,
-                 ).pack(fill="x")
+        blocks = self._fat.get_file_blocks(node.inode.inode_number)
+        if not blocks:
+            messagebox.showinfo("View Content",
+                                "No blocks allocated for this file.",
+                                parent=root_w)
+            return
 
-        txt = tk.Text(dialog, wrap="word",
-                      bg=COLORS["bg_dark"], fg=COLORS["accent_green"],
-                      font=FONT_MONO, relief="flat", padx=10, pady=8)
-        txt.pack(fill="both", expand=True)
+        # Read up to the first 5 blocks and display as text
+        content_parts: list = []
+        for b in blocks[:5]:
+            try:
+                data = self._disk.read_block(b)
+                text = data.rstrip(b"\x00").decode("utf-8", errors="replace")
+                content_parts.append(f"[Block {b}] {text}")
+            except Exception:
+                content_parts.append(f"[Block {b}] <read error>")
 
-        # Try to read content from disk via FAT if available
-        content_lines = []
-        if node.inode and self._fat and self._disk:
-            blocks = self._fat.file_to_blocks.get(node.inode.inode_number, [])
-            if isinstance(blocks, list):
-                for b in blocks:
-                    try:
-                        data = self._disk.read_block(b)
-                        if isinstance(data, bytes):
-                            # Show hex + ascii preview
-                            hex_str = data[:64].hex()
-                            ascii_str = "".join(
-                                chr(c) if 32 <= c < 127 else "."
-                                for c in data[:64]
-                            )
-                            content_lines.append(
-                                f"Block {b:4d}: {hex_str[:32]}...  |{ascii_str}|")
-                        else:
-                            content_lines.append(f"Block {b:4d}: <empty>")
-                    except Exception:
-                        content_lines.append(f"Block {b:4d}: <read error>")
+        if len(blocks) > 5:
+            content_parts.append(f"… ({len(blocks) - 5} more blocks)")
 
-        if not content_lines:
-            content_lines = [
-                "(Simulated file — no raw disk data available)",
-                "",
-                f"File: {node.name}",
-                f"Size: {self._format_size(node.inode.size_bytes) if node.inode else 'unknown'}",
-                f"Inode: #{node.inode.inode_number if node.inode else 'N/A'}",
-            ]
+        messagebox.showinfo(f"Content — {node.name}",
+                            "\n".join(content_parts),
+                            parent=root_w)
 
-        txt.insert("1.0", "\n".join(content_lines))
-        txt.configure(state="disabled")
-
-        tk.Button(dialog, text="Close", bg=COLORS["bg_card"],
-                  fg=COLORS["text_primary"], font=FONT_BODY,
-                  width=10, relief="flat", cursor="hand2",
-                  command=dialog.destroy).pack(pady=8)
-
-    # ================================================================= #
-    #  Path / selection helpers
-    # ================================================================= #
+    # --------------------------------------------------------------------- #
+    #  Selection helpers
+    # --------------------------------------------------------------------- #
 
     def get_selected_path(self) -> Optional[str]:
-        """Return the absolute path of the currently selected item."""
-        return self.selected_path
+        """Return the path of the selected item, or ``None`` if nothing selected."""
+        sel = self.tree_widget.selection()
+        if not sel:
+            return None
+        return self._get_item_path(sel[0])
 
-    def expand_to_path(self, path: str) -> None:
+    def expand_to_path(self, path: str):
         """
-        Expand the tree to show a specific path and select it.
+        Expand the tree to reveal *path* and select it.
 
-        Args:
-            path: Absolute path to expand to (e.g. ``'/home/user/file.txt'``).
+        If the path does not map to an existing treeview item the
+        method silently returns.
         """
-        if not path or path == "/":
-            # Select root
-            children = self.tree_widget.get_children()
-            if children:
-                self.tree_widget.selection_set(children[0])
-                self.tree_widget.see(children[0])
-            return
+        parts = [p for p in path.split("/") if p]
+        current_items = self.tree_widget.get_children("")
+        current_id = None
 
-        # Walk the tree items to find a matching node
-        target_node = self.directory_tree.resolve_path(path)
-        if target_node is None:
-            return
-
-        for item_id, node in self._item_to_node.items():
-            if node is target_node:
-                # Open all ancestors
-                parent = self.tree_widget.parent(item_id)
-                while parent:
-                    self.tree_widget.item(parent, open=True)
-                    parent = self.tree_widget.parent(parent)
-
-                self.tree_widget.selection_set(item_id)
-                self.tree_widget.see(item_id)
-                self.tree_widget.focus(item_id)
-                self.selected_path = path
+        for part in parts:
+            found = False
+            for cid in current_items:
+                text = self.tree_widget.item(cid, "text")
+                # Strip icon prefix added during populate
+                clean = text.lstrip("📁📄 ").strip()
+                if clean == part:
+                    self.tree_widget.item(cid, open=True)
+                    current_id = cid
+                    current_items = self.tree_widget.get_children(cid)
+                    found = True
+                    break
+            if not found:
                 return
 
-    # ================================================================= #
+        if current_id:
+            self.tree_widget.selection_set(current_id)
+            self.tree_widget.see(current_id)
+            self.selected_path = path
+
+    # --------------------------------------------------------------------- #
     #  Search
-    # ================================================================= #
+    # --------------------------------------------------------------------- #
 
     def search_tree(self, search_term: str) -> List[str]:
         """
-        Search for items whose name matches *search_term*.
+        Search the directory tree for items whose name contains *search_term*.
 
-        Args:
-            search_term: Case-insensitive substring to match.
+        Matching items are highlighted (selected) in the treeview and
+        their paths returned.
 
-        Returns:
-            List of absolute paths that matched.
+        Parameters
+        ----------
+        search_term : str
+            Case-insensitive substring to match against node names.
+
+        Returns
+        -------
+        list[str]
+            Absolute paths of every matching node.
         """
-        if not search_term:
-            return []
-
-        term = search_term.lower()
         matches: List[str] = []
+        self._search_node(self.directory_tree.root, search_term.lower(),
+                          matches)
 
-        # Clear previous highlights
-        for item_id in self._item_to_node:
-            tags = list(self.tree_widget.item(item_id, "tags"))
-            if "search_match" in tags:
-                tags.remove("search_match")
-                self.tree_widget.item(item_id, tags=tags)
-
-        # Search
-        for item_id, node in self._item_to_node.items():
-            if term in node.name.lower():
-                path = node.get_full_path()
-                matches.append(path)
-                # Highlight
-                tags = list(self.tree_widget.item(item_id, "tags"))
-                tags.append("search_match")
-                self.tree_widget.item(item_id, tags=tags)
-                # Ensure visible
-                parent = self.tree_widget.parent(item_id)
-                while parent:
-                    self.tree_widget.item(parent, open=True)
-                    parent = self.tree_widget.parent(parent)
-
-        self._search_matches = matches
-
-        # Select first match
-        if matches:
-            self.expand_to_path(matches[0])
+        # Highlight matches in the widget
+        matching_ids: list = []
+        self._find_matching_ids("", search_term.lower(), matching_ids)
+        if matching_ids:
+            self.tree_widget.selection_set(*matching_ids)
+            self.tree_widget.see(matching_ids[0])
 
         return matches
 
-    def _do_search(self) -> None:
-        """Handle search from the toolbar entry."""
-        term = self._sv_search.get().strip()
-        matches = self.search_tree(term)
-        if not term:
-            return
-        if matches:
-            messagebox.showinfo(
-                "Search Results",
-                f"Found {len(matches)} match(es):\n\n"
-                + "\n".join(matches[:15])
-                + ("\n…" if len(matches) > 15 else ""),
-            )
-        else:
-            messagebox.showinfo("Search Results",
-                                f"No items matching '{term}'.")
+    def _search_node(self, node: DirectoryNode, term: str,
+                     results: List[str]):
+        """Recursively search from *node* and collect matching paths."""
+        if term in node.name.lower():
+            results.append(node.get_full_path())
+        if node.is_directory:
+            for child in node.children.values():
+                self._search_node(child, term, results)
 
-    # ================================================================= #
-    #  Internal helper: get full path for a tree item
-    # ================================================================= #
+    def _find_matching_ids(self, parent: str, term: str,
+                           result_ids: list):
+        """Walk the treeview items and collect IDs whose text matches."""
+        for cid in self.tree_widget.get_children(parent):
+            text = self.tree_widget.item(cid, "text").lower()
+            if term in text:
+                result_ids.append(cid)
+            self._find_matching_ids(cid, term, result_ids)
 
-    def _get_item_path(self, item_id: str) -> Optional[str]:
+    # --------------------------------------------------------------------- #
+    #  Private helpers
+    # --------------------------------------------------------------------- #
+
+    def _get_item_path(self, item_id: str) -> str:
         """
-        Get the full filesystem path for a treeview item.
+        Walk from *item_id* to the root and build the full path.
 
-        Args:
-            item_id: ttk.Treeview item identifier.
-
-        Returns:
-            Absolute path string, or None if item is unknown.
+        Strips emoji icon prefixes added during ``populate_tree``.
         """
-        node = self._item_to_node.get(item_id)
-        if node:
-            return node.get_full_path()
-        return None
-
-    # ================================================================= #
-    #  Formatting helpers
-    # ================================================================= #
+        parts: list = []
+        current = item_id
+        while current:
+            text = self.tree_widget.item(current, "text")
+            # Strip the emoji icon prefix
+            clean = text.lstrip("📁📄 ").strip()
+            if clean:
+                parts.append(clean)
+            current = self.tree_widget.parent(current)
+        parts.reverse()
+        if not parts:
+            return "/"
+        return "/" + "/".join(parts)
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
         """
-        Format a byte count in human-readable form.
+        Format a byte count as a human-readable string.
 
         Examples: ``"0 B"``, ``"4.0 KB"``, ``"1.5 MB"``, ``"2.3 GB"``
         """
@@ -955,17 +796,23 @@ class TreeView:
         elif size_bytes < 1024 ** 2:
             return f"{size_bytes / 1024:.1f} KB"
         elif size_bytes < 1024 ** 3:
-            return f"{size_bytes / (1024 ** 2):.1f} MB"
+            return f"{size_bytes / 1024 ** 2:.1f} MB"
         else:
-            return f"{size_bytes / (1024 ** 3):.1f} GB"
+            return f"{size_bytes / 1024 ** 3:.1f} GB"
 
     @staticmethod
     def _format_date(timestamp: datetime) -> str:
         """
-        Format a datetime for compact display.
-
-        Example: ``"2024-03-15 14:30"``
+        Format a ``datetime`` for display (``YYYY-MM-DD HH:MM``).
         """
         if isinstance(timestamp, datetime):
             return timestamp.strftime("%Y-%m-%d %H:%M")
-        return str(timestamp) if timestamp else ""
+        return str(timestamp)
+
+    def _fire_change(self):
+        """Notify the parent that the tree model was mutated."""
+        if self._on_change:
+            try:
+                self._on_change()
+            except Exception:
+                logger.debug("on_change callback failed", exc_info=True)
