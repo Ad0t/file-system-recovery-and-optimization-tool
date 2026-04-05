@@ -1,7 +1,7 @@
 """Tests for the Inode class."""
 
 import pytest
-from src.core.inode import Inode
+from backend.src.core.inode import Inode
 
 
 class TestInode:

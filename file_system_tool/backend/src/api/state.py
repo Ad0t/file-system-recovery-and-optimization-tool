@@ -1,24 +1,28 @@
 import sys
 import os
 
-# Add project root to path so we can import from src
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-sys.path.insert(0, project_root)
+# Add project root to path so we can import from src (file_system_tool/)
+current_file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_file_dir, "..", "..", "..", ".."))
+
+# Add project root to path so imports like 'from src.core...' work
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from dataclasses import dataclass, field
 from typing import Dict, Any, List
 from datetime import datetime
 
-from src.core.disk import Disk
-from src.core.free_space import FreeSpaceManager
-from src.core.directory import DirectoryTree
-from src.core.file_allocation_table import FileAllocationTable
-from src.core.journal import Journal
-from src.recovery.crash_simulator import CrashSimulator
-from src.recovery.recovery_manager import RecoveryManager
-from src.recovery.defragmenter import Defragmenter
-from src.recovery.cache_manager import CacheManager
-from src.recovery.performance_analyzer import PerformanceAnalyzer
+from backend.src.core.disk import Disk
+from backend.src.core.free_space import FreeSpaceManager
+from backend.src.core.directory import DirectoryTree
+from backend.src.core.file_allocation_table import FileAllocationTable
+from backend.src.core.journal import Journal
+from backend.src.recovery.crash_simulator import CrashSimulator
+from backend.src.recovery.recovery_manager import RecoveryManager
+from backend.src.recovery.defragmenter import Defragmenter
+from backend.src.recovery.cache_manager import CacheManager
+from backend.src.recovery.performance_analyzer import PerformanceAnalyzer
 
 
 @dataclass

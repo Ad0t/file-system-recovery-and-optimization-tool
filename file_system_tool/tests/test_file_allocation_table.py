@@ -1,7 +1,7 @@
 """Tests for the FileAllocationTable class."""
 
 import pytest
-from src.core.file_allocation_table import FileAllocationTable
+from backend.src.core.file_allocation_table import FileAllocationTable
 
 
 class TestFileAllocationTable:

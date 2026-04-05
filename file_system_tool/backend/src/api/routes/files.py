@@ -1,15 +1,19 @@
 import sys
 import os
 
-# Add project root to path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-sys.path.insert(0, project_root)
+# Add project root to path (file_system_tool/)
+current_file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_file_dir, "..", "..", "..", "..", ".."))
+
+# Add project root to path so imports like 'from src.core...' work
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from fastapi import APIRouter, HTTPException, Request
 from typing import List
 import traceback
 
-from src.core.inode import Inode
+from backend.src.core.inode import Inode
 
 from ..schemas.filesystem import (
     CreateFileRequest, CreateDirectoryRequest, DeleteItemRequest,
@@ -49,6 +53,10 @@ async def create_file(request: CreateFileRequest, app_request: Request):
 
         # Update FAT
         fs.fat.allocate(inode.inode_number, blocks)
+
+        # Write actual data to disk blocks
+        for block in blocks:
+            fs.disk.write_block(block, b'FILE_DATA' * 50)  # Write dummy data
 
         # Journal transaction
         txn_id = fs.journal.begin_transaction('CREATE_FILE', {
@@ -150,9 +158,8 @@ async def list_directory(path: str = "/", app_request: Request = None):
                 name=item['name'],
                 path=f"{path}/{item['name']}".replace('//', '/'),
                 type=FileType.DIRECTORY if item['is_directory'] else FileType.FILE,
-                size=item.get('size'),
-                created=item.get('created'),
-                modified=item.get('modified')
+                size=item.get('size', 0),
+                modified_time=item.get('modified_time', '')
             )
             for item in items_data
         ]
@@ -168,13 +175,17 @@ async def get_disk_info(app_request: Request):
     fs = app_request.app.state.fs
     info = fs.disk.get_disk_info()
 
+    # Use free space manager for accurate allocation counts
+    used_blocks = fs.fsm.get_allocated_count()
+    free_blocks = fs.fsm.get_free_count()
+
     return DiskInfo(
         total_blocks=info['total_blocks'],
         block_size=info['block_size'],
-        total_capacity_mb=info['total_capacity'] / (1024 * 1024),
-        used_blocks=info['blocks_used'],
-        free_blocks=info['total_blocks'] - info['blocks_used'],
-        usage_percentage=(info['blocks_used'] / info['total_blocks']) * 100
+        total_capacity_mb=info['total_capacity_mb'],
+        used_blocks=used_blocks,
+        free_blocks=free_blocks,
+        usage_percentage=(used_blocks / info['total_blocks']) * 100 if info['total_blocks'] > 0 else 0
     )
 
 

@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from src.core.journal import Journal, JournalEntry
+from backend.src.core.journal import Journal, JournalEntry
 
 
 class TestJournalEntry:

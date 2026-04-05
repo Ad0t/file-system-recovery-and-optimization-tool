@@ -1,7 +1,7 @@
 """Tests for the FreeSpaceManager class."""
 
 import pytest
-from src.core.free_space import FreeSpaceManager
+from backend.src.core.free_space import FreeSpaceManager
 
 
 class TestFreeSpaceManager:

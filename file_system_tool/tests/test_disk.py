@@ -2,8 +2,8 @@
 
 import pytest
 import os
-from src.core.disk import Disk
-from src.utils.constants import FileSystemConfig
+from backend.src.core.disk import Disk
+from backend.src.utils.constants import FileSystemConfig
 
 
 class TestDisk:

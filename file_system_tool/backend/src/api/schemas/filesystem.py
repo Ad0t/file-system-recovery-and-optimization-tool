@@ -28,8 +28,9 @@ class FileInfo(BaseModel):
     path: str
     type: FileType
     size: Optional[int] = None
-    created: datetime
-    modified: datetime
+    created: Optional[datetime] = None
+    modified: Optional[datetime] = None
+    modified_time: Optional[str] = None
     inode_number: Optional[int] = None
     blocks: Optional[List[int]] = None
 

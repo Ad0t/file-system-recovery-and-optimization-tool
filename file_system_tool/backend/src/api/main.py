@@ -1,10 +1,16 @@
 import sys
 import os
 
-# Add project root to path so we can import from src
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-sys.path.insert(0, project_root)
+# Add project root to path BEFORE any other imports
+# This ensures the root 'src' (with core modules) is found before 'backend/src'
+current_file_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_file_dir, "..", "..", "..", ".."))
 
+# Insert at position 0 to ensure highest priority
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Now we can safely import from the root src folder
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -13,19 +19,19 @@ import asyncio
 import json
 from typing import Dict, Any
 
-# Import file system components
-from src.core.disk import Disk
-from src.core.free_space import FreeSpaceManager
-from src.core.inode import Inode
-from src.core.directory import DirectoryTree
-from src.core.file_allocation_table import FileAllocationTable
-from src.core.journal import Journal
+# Import file system components from the main src folder (not backend/src)
+from backend.src.core.disk import Disk
+from backend.src.core.free_space import FreeSpaceManager
+from backend.src.core.inode import Inode
+from backend.src.core.directory import DirectoryTree
+from backend.src.core.file_allocation_table import FileAllocationTable
+from backend.src.core.journal import Journal
 
-from src.recovery.crash_simulator import CrashSimulator
-from src.recovery.recovery_manager import RecoveryManager
-from src.recovery.defragmenter import Defragmenter
-from src.recovery.cache_manager import CacheManager
-from src.recovery.performance_analyzer import PerformanceAnalyzer
+from backend.src.recovery.crash_simulator import CrashSimulator
+from backend.src.recovery.recovery_manager import RecoveryManager
+from backend.src.recovery.defragmenter import Defragmenter
+from backend.src.recovery.cache_manager import CacheManager
+from backend.src.recovery.performance_analyzer import PerformanceAnalyzer
 
 from .state import AppState
 from .routes import files, recovery, optimization, metrics

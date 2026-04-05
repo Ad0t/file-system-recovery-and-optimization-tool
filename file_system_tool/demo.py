@@ -1,17 +1,17 @@
 import time
 import logging
 
-from src.core.disk import Disk
-from src.core.free_space import FreeSpaceManager
-from src.core.file_allocation_table import FileAllocationTable
-from src.core.directory import DirectoryTree
-from src.core.journal import Journal
+from backend.src.core.disk import Disk
+from backend.src.core.free_space import FreeSpaceManager
+from backend.src.core.file_allocation_table import FileAllocationTable
+from backend.src.core.directory import DirectoryTree
+from backend.src.core.journal import Journal
 
-from src.recovery.cache_manager import CacheManager
-from src.recovery.recovery_manager import RecoveryManager
-from src.recovery.defragmenter import Defragmenter
-from src.recovery.performance_analyzer import PerformanceAnalyzer
-from src.recovery.crash_simulator import CrashSimulator
+from backend.src.recovery.cache_manager import CacheManager
+from backend.src.recovery.recovery_manager import RecoveryManager
+from backend.src.recovery.defragmenter import Defragmenter
+from backend.src.recovery.performance_analyzer import PerformanceAnalyzer
+from backend.src.recovery.crash_simulator import CrashSimulator
 
 # Setup simple console logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

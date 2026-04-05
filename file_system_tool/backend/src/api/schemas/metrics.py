@@ -1,17 +1,16 @@
 from pydantic import BaseModel
 from typing import List, Dict
-from datetime import datetime
 
 
 class PerformanceMetrics(BaseModel):
-    timestamp: datetime
+    timestamp: float
     disk_usage_percentage: float
     fragmentation_percentage: float
     cache_hit_rate: float
-    read_throughput_mbps: float
-    write_throughput_mbps: float
-    iops: int
-    free_space_mb: float
+    average_read_time: float
+    average_write_time: float
+    total_operations: int
+    free_space_percentage: float
 
 
 class BenchmarkRequest(BaseModel):

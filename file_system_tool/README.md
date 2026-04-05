@@ -1,56 +1,129 @@
-# File System Simulator
+# File System Recovery and Optimization Tool (Web Version)
 
-A Python-based file system simulator that models core OS-level file system components for educational and experimental purposes.
+Full-stack web application for file system simulation, crash recovery, and performance optimization.
+
+## Architecture
+
+- **Backend**: Python + FastAPI + WebSockets
+- **Frontend**: React + TypeScript + Tailwind CSS
+- **Real-time Updates**: WebSocket communication
+
+## Quick Start
+
+### Option 1: Using Startup Scripts
+
+**Linux/Mac:**
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+**Windows:**
+```bash
+start.bat
+```
+
+### Option 2: Manual Setup
+
+**Backend:**
+```bash
+cd backend
+pip install -r requirements.txt
+python -m uvicorn src.api.main:app --reload
+```
+
+**Frontend:**
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### Option 3: Docker
+```bash
+docker-compose up
+```
+
+## Access
+
+- Frontend: http://localhost:5173
+- Backend API: http://localhost:8000
+- API Documentation: http://localhost:8000/docs
+- WebSocket: ws://localhost:8000/ws
+
+## Features
+
+- File and directory management
+- Real-time disk visualization
+- Crash simulation and recovery
+- Performance monitoring with live charts
+- Defragmentation
+- Caching strategies
+- Comprehensive logging
+
+## Development
+
+**Backend:**
+- FastAPI for REST API
+- WebSockets for real-time updates
+- Modules 1 & 2 for file system logic
+
+**Frontend:**
+- React 18 with TypeScript
+- Zustand for state management
+- Recharts for visualizations
+- Tailwind CSS for styling
+
+## Testing
+
+**Backend:**
+```bash
+cd backend
+pytest tests/
+```
+
+**Frontend:**
+```bash
+cd frontend
+npm run test
+```
+
+**API Testing:**
+Visit http://localhost:8000/docs for interactive API testing.
+
+## Deployment
+
+**Build for production:**
+
+Backend:
+```bash
+cd backend
+pip install gunicorn
+gunicorn src.api.main:app -w 4 -k uvicorn.workers.UvicornWorker
+```
+
+Frontend:
+```bash
+cd frontend
+npm run build
+# Serve dist/ folder with any static server
+```
 
 ## Project Structure
 
 ```
 file_system_tool/
-├── src/
-│   ├── core/
-│   │   ├── disk.py                  # Simulated block-based disk storage
-│   │   ├── inode.py                 # Inode and inode table management
-│   │   ├── directory.py             # Hierarchical directory structure
-│   │   ├── free_space.py            # Free space bitmap management
-│   │   ├── file_allocation_table.py # FAT-style block chain tracking
-│   │   └── journal.py               # Journaling for crash recovery
-│   └── utils/
-│       ├── constants.py             # System-wide configuration constants
-│       └── helpers.py               # Utility functions
-├── tests/                           # Unit tests for all core modules
-├── data/                            # Data directory for simulation files
-├── requirements.txt
-└── README.md
+├── backend/           # Python backend
+│   ├── src/
+│   │   ├── core/     # Module 1
+│   │   ├── recovery/ # Module 2
+│   │   └── api/      # REST API
+│   └── tests/
+│
+└── frontend/          # React frontend
+    ├── src/
+    │   ├── components/
+    │   ├── api/
+    │   └── store/
+    └── public/
 ```
-
-## Components
-
-| Module | Description |
-|--------|-------------|
-| **Disk** | Simulates block-based storage with read/write/clear operations |
-| **Inode** | Manages file/directory metadata (permissions, timestamps, block pointers) |
-| **Directory** | Hierarchical directory structure with entry management |
-| **FreeSpaceManager** | Bitmap-based block allocation tracking using `bitarray` |
-| **FileAllocationTable** | FAT-style linked block chain management |
-| **Journal** | Operation logging for crash recovery with commit/rollback |
-
-## Setup
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run tests
-cd file_system_tool
-pytest tests/ -v
-```
-
-## Running Tests
-
-```bash
-pytest tests/ -v
-```
-
-## License
-
-This project is for educational purposes.

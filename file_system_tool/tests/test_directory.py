@@ -1,7 +1,7 @@
 """Tests for the DirectoryNode and DirectoryTree classes."""
 
 import pytest
-from src.core.directory import DirectoryNode, DirectoryTree
+from backend.src.core.directory import DirectoryNode, DirectoryTree
 
 
 class TestDirectoryNode:

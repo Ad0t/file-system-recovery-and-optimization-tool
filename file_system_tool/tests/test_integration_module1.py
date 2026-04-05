@@ -20,12 +20,12 @@ import tempfile
 
 import pytest
 
-from src.core.disk import Disk
-from src.core.free_space import FreeSpaceManager
-from src.core.inode import Inode
-from src.core.directory import DirectoryTree
-from src.core.file_allocation_table import FileAllocationTable
-from src.core.journal import Journal
+from backend.src.core.disk import Disk
+from backend.src.core.free_space import FreeSpaceManager
+from backend.src.core.inode import Inode
+from backend.src.core.directory import DirectoryTree
+from backend.src.core.file_allocation_table import FileAllocationTable
+from backend.src.core.journal import Journal
 
 
 # ===================================================================== #
