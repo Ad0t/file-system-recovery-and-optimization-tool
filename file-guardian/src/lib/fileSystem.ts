@@ -3,7 +3,11 @@
 export type BlockState = 'free' | 'used' | 'corrupted' | 'reserved' | 'journal';
 export type AllocationStrategy = 'contiguous' | 'linked' | 'indexed';
 export type FreeSpaceStrategy = 'first-fit' | 'best-fit' | 'worst-fit';
-export type CrashType = 'power-failure' | 'kernel-panic' | 'disk-error';
+export type CrashType =
+  | 'physical-layer'
+  | 'structural-layer'
+  | 'transactional-layer'
+  | 'scenario-based';
 
 export interface DiskBlock {
   id: number;
@@ -263,41 +267,89 @@ export function simulateCrash(disk: DiskBlock[], severity: number, crashType: Cr
   let details = '';
 
   switch (crashType) {
-    case 'power-failure': {
-      // Power failure: corrupts random blocks, may leave uncommitted writes
-      const numCorrupt = Math.floor(usedBlocks.length * severity * 0.5);
+    case 'physical-layer': {
+      // Physical layer: power failure / sector failure / bit corruption
+      // Simulates abrupt power-off — random blocks lose state, sectors go bad
+      const numCorrupt = Math.floor(usedBlocks.length * severity * 0.55);
+      const shuffled = [...usedBlocks].sort(() => Math.random() - 0.5);
+      // Corrupt scattered random blocks (bit/power) + a contiguous sector region
+      shuffled.slice(0, numCorrupt).forEach(b => {
+        const idx = newDisk.findIndex(bl => bl.id === b.id);
+        if (b.fileId) corruptedFiles.add(b.fileId);
+        newDisk[idx] = { ...newDisk[idx], state: 'corrupted' };
+      });
+      // Sector failure: corrupt a contiguous range of blocks
+      const sectorStart = Math.floor(Math.random() * (TOTAL_BLOCKS - 10)) + 4;
+      const sectorLen = Math.max(2, Math.floor(severity * 12));
+      for (let i = sectorStart; i < Math.min(sectorStart + sectorLen, TOTAL_BLOCKS); i++) {
+        if (newDisk[i].fileId) corruptedFiles.add(newDisk[i].fileId!);
+        newDisk[i] = { ...newDisk[i], state: 'corrupted' };
+      }
+      details = `Physical layer: ${numCorrupt} blocks corrupted (power failure + sector failure + bit corruption)`;
+      break;
+    }
+    case 'structural-layer': {
+      // Structural layer: metadata corruption / directory tree corruption / allocation table corruption
+      // Breaks file linkage — next-block pointers severed, fragments scrambled
+      const numCorrupt = Math.floor(usedBlocks.length * severity * 0.6);
+      const shuffled = [...usedBlocks].sort(() => Math.random() - 0.5);
+      shuffled.slice(0, numCorrupt).forEach(b => {
+        const idx = newDisk.findIndex(bl => bl.id === b.id);
+        if (b.fileId) corruptedFiles.add(b.fileId);
+        // Sever linked-chain pointers and scramble fragment index (metadata/dir-tree damage)
+        newDisk[idx] = { ...newDisk[idx], state: 'corrupted', nextBlock: null, fragment: -1 };
+      });
+      details = `Structural layer: ${numCorrupt} blocks corrupted (metadata + directory tree + allocation table)`;
+      break;
+    }
+    case 'transactional-layer': {
+      // Transactional layer: journal corruption / transaction corruption / incomplete write
+      // Targets journal and partially-committed transactions — uses-blocks become inconsistent
+      const numCorrupt = Math.floor(usedBlocks.length * severity * 0.4);
       const shuffled = [...usedBlocks].sort(() => Math.random() - 0.5);
       shuffled.slice(0, numCorrupt).forEach(b => {
         const idx = newDisk.findIndex(bl => bl.id === b.id);
         if (b.fileId) corruptedFiles.add(b.fileId);
         newDisk[idx] = { ...newDisk[idx], state: 'corrupted' };
       });
-      details = `Power failure: ${numCorrupt} blocks corrupted, ${corruptedFiles.size} files affected`;
+      // Incomplete write: a trailing portion of one file is zeroed out
+      const targetFiles = Array.from(corruptedFiles);
+      if (targetFiles.length > 0) {
+        const trailingBlocks = newDisk.filter(b => b.fileId === targetFiles[0] && b.state === 'corrupted');
+        const half = Math.ceil(trailingBlocks.length / 2);
+        trailingBlocks.slice(half).forEach(b => {
+          const idx = newDisk.findIndex(bl => bl.id === b.id);
+          newDisk[idx] = { ...newDisk[idx], state: 'free', fileId: null };
+        });
+      }
+      details = `Transactional layer: ${numCorrupt} blocks corrupted (journal + transaction + incomplete write)`;
       break;
     }
-    case 'kernel-panic': {
-      // Kernel panic: corrupts more aggressively, breaks linked chains
-      const numCorrupt = Math.floor(usedBlocks.length * severity * 0.7);
+    case 'scenario-based': {
+      // Scenario based: cascading failure — chain of physical + structural + transactional faults
+      const phase1 = Math.floor(usedBlocks.length * severity * 0.3);
+      const phase2 = Math.floor(usedBlocks.length * severity * 0.25);
       const shuffled = [...usedBlocks].sort(() => Math.random() - 0.5);
-      shuffled.slice(0, numCorrupt).forEach(b => {
+      // Phase 1 — physical shock
+      shuffled.slice(0, phase1).forEach(b => {
         const idx = newDisk.findIndex(bl => bl.id === b.id);
         if (b.fileId) corruptedFiles.add(b.fileId);
-        newDisk[idx] = { ...newDisk[idx], state: 'corrupted', nextBlock: null };
+        newDisk[idx] = { ...newDisk[idx], state: 'corrupted' };
       });
-      details = `Kernel panic: ${numCorrupt} blocks corrupted, linked chains broken`;
-      break;
-    }
-    case 'disk-error': {
-      // Disk error: corrupts contiguous regions
+      // Phase 2 — structural cascade on remaining used blocks
+      shuffled.slice(phase1, phase1 + phase2).forEach(b => {
+        const idx = newDisk.findIndex(bl => bl.id === b.id);
+        if (b.fileId) corruptedFiles.add(b.fileId);
+        newDisk[idx] = { ...newDisk[idx], state: 'corrupted', nextBlock: null, fragment: -1 };
+      });
+      // Phase 3 — sector-level cascade: corrupt a contiguous region
       const regionStart = Math.floor(Math.random() * (TOTAL_BLOCKS - 20)) + 4;
-      const regionSize = Math.floor(severity * 40) + 5;
+      const regionSize = Math.floor(severity * 30) + 5;
       for (let i = regionStart; i < Math.min(regionStart + regionSize, TOTAL_BLOCKS); i++) {
-        if (newDisk[i].state === 'used') {
-          if (newDisk[i].fileId) corruptedFiles.add(newDisk[i].fileId);
-          newDisk[i] = { ...newDisk[i], state: 'corrupted', nextBlock: null };
-        }
+        if (newDisk[i].fileId) corruptedFiles.add(newDisk[i].fileId!);
+        newDisk[i] = { ...newDisk[i], state: 'corrupted', nextBlock: null };
       }
-      details = `Disk error at blocks ${regionStart}-${regionStart + regionSize}: region corrupted`;
+      details = `Cascading failure: ${corruptedFiles.size} files affected across ${phase1 + phase2 + regionSize} blocks`;
       break;
     }
   }

@@ -16,7 +16,7 @@ import {
   fetchState, apiCreateFile, apiCreateDirectory, apiDeleteFile,
   apiCrashDisk, apiRecover, apiDefragment, apiFsck,
   apiSetCacheSize, apiClearCache, apiSetAllocationMethod,
-  apiSetAllocationStrategy,
+  apiSetAllocationStrategy, apiCreateFileWithPowerFail, apiReplayJournal,
   ApiState,
 } from '@/lib/api';
 
@@ -79,6 +79,7 @@ export function useFileSystem() {
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
   const [lastFsckResult, setLastFsckResult] = useState<FsckResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [simulateCrashOnNextWrite, setSimulateCrashOnNextWrite] = useState(false);
 
   // Track the current allocation method for benchmarks
   const currentAllocMethod = useRef<AllocationStrategy>('contiguous');
@@ -143,7 +144,13 @@ export function useFileSystem() {
         // Backend size is in bytes, frontend size is block count
         const sizeInBytes = size * 4096;
 
-        await apiCreateFile(filePath, sizeInBytes);
+        const shouldSimulateCrash = simulateCrashOnNextWrite;
+        if (shouldSimulateCrash) {
+          setSimulateCrashOnNextWrite(false);
+          await apiCreateFileWithPowerFail(filePath, sizeInBytes, 0.5);
+        } else {
+          await apiCreateFile(filePath, sizeInBytes);
+        }
 
         currentAllocMethod.current = allocationStrategy;
 
@@ -152,7 +159,11 @@ export function useFileSystem() {
         setBenchmarkResults(prev => [bench, ...prev].slice(0, 100));
 
         await refreshState();
-        setLastAction(`Created "${name}" (${size} blocks, ${allocationStrategy})`);
+        setLastAction(
+          shouldSimulateCrash
+            ? `Created "${name}" with simulated power-fail during write`
+            : `Created "${name}" (${size} blocks, ${allocationStrategy})`
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unknown error';
         setLastAction(`Failed to create "${name}": ${msg}`);
@@ -163,7 +174,7 @@ export function useFileSystem() {
 
     setMethodAndCreate();
     return true; // Optimistic — errors shown via lastAction
-  }, [refreshState]);
+  }, [refreshState, simulateCrashOnNextWrite]);
 
   const deleteFile = useCallback((fileId: string) => {
     const file = files.get(fileId);
@@ -279,7 +290,7 @@ export function useFileSystem() {
 
     (async () => {
       try {
-        const result = await apiFsck(autoRepair);
+        const result = await apiFsck(autoRepair, false);
         await refreshState();
 
         // Try to build FsckResult from backend response
@@ -288,18 +299,20 @@ export function useFileSystem() {
           const missing = ((result.blocks_marked_free_but_allocated as unknown[]) || []).length;
           const badInodes = ((result.orphaned_inodes as unknown[]) || []).length;
           const invalidDirs = ((result.invalid_directory_entries as unknown[]) || []).length;
+          const corrupted = ((result.corrupted_blocks as unknown[]) || []).length;
 
           const detailsArr: string[] = [];
           if (orphaned > 0) detailsArr.push(`Found ${orphaned} leaked blocks`);
           if (missing > 0) detailsArr.push(`${missing} blocks missing in FSM`);
           if (badInodes > 0) detailsArr.push(`${badInodes} orphaned inodes`);
+          if (corrupted > 0) detailsArr.push(`${corrupted} corrupted blocks detected`);
           if (invalidDirs > 0) detailsArr.push(`${invalidDirs} invalid directory entries`);
           if (detailsArr.length === 0) detailsArr.push('Check complete - no issues found');
 
           const fsckResult: FsckResult = {
             orphanedBlocks: orphaned,
             brokenChains: missing,
-            inconsistencies: badInodes + invalidDirs,
+            inconsistencies: badInodes + invalidDirs + corrupted,
             repaired: autoRepair,
             details: detailsArr,
           };
@@ -311,6 +324,42 @@ export function useFileSystem() {
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unknown error';
         setLastAction(`fsck failed: ${msg}`);
+      }
+    })();
+  }, [refreshState]);
+
+  const quarantineOrphans = useCallback(() => {
+    setLastAction('Running fsck + quarantine to /lost+found...');
+    (async () => {
+      try {
+        const result = await apiFsck(false, true);
+        await refreshState();
+        const quarantined = ((result.quarantined_files as unknown[]) || []).length;
+        const backendMessage = typeof result.quarantine_message === 'string' ? result.quarantine_message : '';
+        setLastAction(
+          backendMessage || (
+            quarantined > 0
+              ? `Quarantined ${quarantined} orphaned chain(s) to /lost+found`
+              : 'No orphaned chains found to quarantine'
+          )
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        setLastAction(`Quarantine failed: ${msg}`);
+      }
+    })();
+  }, [refreshState]);
+
+  const replayJournal = useCallback(() => {
+    setLastAction('Replaying journal for incomplete writes...');
+    (async () => {
+      try {
+        const result = await apiReplayJournal();
+        await refreshState();
+        setLastAction(`Journal replay complete (${result.replayed_entries} replayed)`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        setLastAction(`Journal replay failed: ${msg}`);
       }
     })();
   }, [refreshState]);
@@ -354,6 +403,8 @@ export function useFileSystem() {
     lastFsckResult, cacheStats, benchmarkHistory, benchmarkResults,
     createFile, deleteFile, accessFile, createDirectory, deleteDirectory,
     crashDisk, recover, defragment, runFsck,
+    quarantineOrphans, replayJournal,
     setCacheSize, clearCache, runIOBenchmark,
+    simulateCrashOnNextWrite, setSimulateCrashOnNextWrite,
   };
 }

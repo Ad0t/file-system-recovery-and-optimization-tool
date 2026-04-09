@@ -62,6 +62,7 @@ class FileAllocationTable:
         self.allocation_method: str = allocation_method
         self.file_to_blocks: Dict[int, List[int]] = {}
         self.block_to_file: Dict[int, int] = {}
+        self.file_to_method: Dict[int, str] = {}
         self.next_pointers: Dict[int, int] = {}
 
         logger.info(
@@ -110,6 +111,7 @@ class FileAllocationTable:
                 return False
 
         self.file_to_blocks[inode_number] = list(blocks)
+        self.file_to_method[inode_number] = "contiguous"
         for b in blocks:
             self.block_to_file[b] = inode_number
 
@@ -147,6 +149,7 @@ class FileAllocationTable:
                 return False
 
         self.file_to_blocks[inode_number] = list(blocks)
+        self.file_to_method[inode_number] = "linked"
         for b in blocks:
             self.block_to_file[b] = inode_number
 
@@ -189,6 +192,7 @@ class FileAllocationTable:
                 return False
 
         self.file_to_blocks[inode_number] = list(blocks)
+        self.file_to_method[inode_number] = "indexed"
         for b in blocks:
             self.block_to_file[b] = inode_number
 
@@ -247,6 +251,7 @@ class FileAllocationTable:
         for b in blocks:
             self.block_to_file.pop(b, None)
             self.next_pointers.pop(b, None)  # safe even if not linked
+        self.file_to_method.pop(inode_number, None)
 
         logger.debug(
             "Deallocated inode %d: freed %d blocks", inode_number, len(blocks),
@@ -281,6 +286,13 @@ class FileAllocationTable:
                 is free.
         """
         return self.block_to_file.get(block_number)
+
+    def get_file_allocation_method(self, inode_number: int) -> str:
+        """
+        Return allocation method used for a specific file inode.
+        Falls back to current global method for legacy entries.
+        """
+        return self.file_to_method.get(inode_number, self.allocation_method)
 
     # ------------------------------------------------------------------ #
     #  Linked-chain traversal

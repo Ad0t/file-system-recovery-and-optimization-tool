@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Characters allowed in file / directory names (letters, digits, . - _ space)
-_VALID_NAME_RE = re.compile(r'^[\w.\- ]+$')
+# Characters allowed in file / directory names (letters, digits, . - _ + space)
+_VALID_NAME_RE = re.compile(r'^[\w.\-+ ]+$')
 
 
 # ===================================================================== #

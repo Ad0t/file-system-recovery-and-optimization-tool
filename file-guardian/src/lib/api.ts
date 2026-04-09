@@ -129,6 +129,13 @@ export const fetchState = () =>
 export const apiCreateFile = (path: string, size: number) =>
   request<{ success: boolean }>('POST', '/fs/create', { path, size });
 
+export const apiCreateFileWithPowerFail = (path: string, size: number, completion_percentage = 0.5) =>
+  request<{ success: boolean; message?: string }>(
+    'POST',
+    '/fs/create/power-fail',
+    { path, size, completion_percentage }
+  );
+
 export const apiCreateDirectory = (path: string) =>
   request<{ success: boolean }>('POST', '/fs/mkdir', { path });
 
@@ -144,8 +151,17 @@ export const apiRecover = () =>
 export const apiDefragment = () =>
   request<{ success: boolean }>('POST', '/optimization/defrag/all', { strategy: 'sequential' });
 
-export const apiFsck = (autoRepair = false) =>
-  request<Record<string, unknown>>('POST', `/recovery/fsck?auto_repair=${autoRepair}`);
+export const apiFsck = (autoRepair = false, quarantineOrphans = false) =>
+  request<Record<string, unknown>>(
+    'POST',
+    `/recovery/fsck?auto_repair=${autoRepair}&quarantine_orphans=${quarantineOrphans}`
+  );
+
+export const apiReplayJournal = () =>
+  request<{ success: boolean; message: string; replayed_entries: number }>(
+    'POST',
+    '/recovery/journal/replay-incomplete-writes'
+  );
 
 export const apiSetCacheSize = (new_size: number) =>
   request<{ success: boolean }>('POST', `/metrics/cache/resize?new_size=${new_size}`);

@@ -57,9 +57,13 @@ const Index = () => {
               onCreateDir={fs.createDirectory}
               onCrash={fs.crashDisk}
               onRecover={fs.recover}
+              onReplayJournal={fs.replayJournal}
               onDefragment={fs.defragment}
               onFsck={fs.runFsck}
+              onQuarantineOrphans={fs.quarantineOrphans}
               onBenchmark={fs.runIOBenchmark}
+              simulateCrashOnNextWrite={fs.simulateCrashOnNextWrite}
+              onToggleSimulateCrashOnNextWrite={fs.setSimulateCrashOnNextWrite}
             />
           </motion.div>
 

@@ -19,18 +19,27 @@ class CrashSimulator:
             random_seed (int, optional): Seed for the random number generator
                 to ensure reproducible crash scenarios.
         """
-        self.crash_types: List[str] = [
-            'POWER_FAILURE',
-            'BIT_CORRUPTION',
-            'METADATA_CORRUPTION',
-            'JOURNAL_CORRUPTION',
-            'INCOMPLETE_WRITE',
-            'CASCADING_FAILURE',
-            'SECTOR_FAILURE',
-            'TRANSACTION_CORRUPTION',
-            'DIRECTORY_TREE_CORRUPTION',
-            'ALLOCATION_TABLE_CORRUPTION'
-        ]
+        # Crash types organised by layer — mirrors the frontend UI categories
+        self.crash_types: Dict[str, List[str]] = {
+            'physical-layer': [
+                'POWER_FAILURE',
+                'SECTOR_FAILURE',
+                'BIT_CORRUPTION',
+            ],
+            'structural-layer': [
+                'METADATA_CORRUPTION',
+                'DIRECTORY_TREE_CORRUPTION',
+                'ALLOCATION_TABLE_CORRUPTION',
+            ],
+            'transactional-layer': [
+                'JOURNAL_CORRUPTION',
+                'TRANSACTION_CORRUPTION',
+                'INCOMPLETE_WRITE',
+            ],
+            'scenario-based': [
+                'CASCADING_FAILURE',
+            ],
+        }
         self.crash_history: List[Dict[str, Any]] = []
         self.random_seed = random_seed
         if random_seed is not None:
@@ -392,18 +401,24 @@ class CrashSimulator:
         """Clear crash history log."""
         self.crash_history.clear()
 
-    def simulate_random_crash(self, file_system_components: Dict[str, Any]) -> Dict[str, Any]:
+    def simulate_random_crash(self, file_system_components: Dict[str, Any], layer: str = None) -> Dict[str, Any]:
         """
-        Randomly select and inject one crash type.
+        Randomly select and inject one crash type, optionally restricted to a layer.
 
         Args:
             file_system_components (dict): Dictionary mapping component names to their instances
                 (e.g., 'disk', 'directory_tree', 'journal').
+            layer (str, optional): One of 'physical-layer', 'structural-layer',
+                'transactional-layer', or 'scenario-based'.  If None, picks any layer.
 
         Returns:
             dict: The crash report.
         """
-        crash_type = random.choice(self.crash_types)
+        if layer and layer in self.crash_types:
+            crash_type = random.choice(self.crash_types[layer])
+        else:
+            all_types = [t for types in self.crash_types.values() for t in types]
+            crash_type = random.choice(all_types)
         
         disk = file_system_components.get('disk')
         directory_tree = file_system_components.get('directory_tree')
@@ -411,18 +426,29 @@ class CrashSimulator:
 
         if crash_type == 'POWER_FAILURE':
             return self.inject_power_failure(disk)
+        elif crash_type == 'SECTOR_FAILURE':
+            return self.inject_sector_failure(disk)
         elif crash_type == 'BIT_CORRUPTION':
             return self.inject_bit_corruption(disk)
         elif crash_type == 'METADATA_CORRUPTION':
             return self.inject_metadata_corruption(directory_tree)
+        elif crash_type == 'DIRECTORY_TREE_CORRUPTION':
+            return self.inject_directory_tree_corruption(directory_tree)
+        elif crash_type == 'ALLOCATION_TABLE_CORRUPTION':
+            fat = file_system_components.get('fat')
+            return self.inject_allocation_table_corruption(fat)
         elif crash_type == 'JOURNAL_CORRUPTION':
             corruption_levels = ['partial', 'complete', 'transaction_only']
             return self.inject_journal_corruption(journal, random.choice(corruption_levels))
+        elif crash_type == 'TRANSACTION_CORRUPTION':
+            return self.inject_transaction_corruption(journal)
         elif crash_type == 'INCOMPLETE_WRITE':
             # Generate dummy block list for incomplete write simulation
             total_blocks = getattr(disk, 'total_blocks', 1024) if disk else 1024
             file_blocks = random.sample(range(total_blocks), random.randint(5, 20))
             return self.inject_incomplete_write(disk, file_blocks=file_blocks)
+        elif crash_type == 'CASCADING_FAILURE':
+            return self.inject_cascading_failure(file_system_components)
             
         return {}
 

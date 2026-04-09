@@ -8,6 +8,7 @@ import math
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, Field
 
 from api.state import get_state
 from api.schemas.filesystem import (
@@ -37,6 +38,13 @@ from utils.constants import FileSystemConfig
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/fs", tags=["File System"])
+
+
+class CreateFilePowerFailRequest(BaseModel):
+    """Request model for create + simulated power failure."""
+    path: str
+    size: int = 0
+    completion_percentage: float = Field(0.5, ge=0.0, le=1.0)
 
 
 @router.get("/ls", response_model=DirectoryListingResponse)
@@ -229,6 +237,71 @@ async def create_file(request: CreateFileRequest):
             )
     except Exception as e:
         logger.error(f"Failed to create file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post("/create/power-fail")
+async def create_file_with_power_fail(request: CreateFilePowerFailRequest):
+    """
+    Create a file, then simulate a power failure during its initial write.
+    """
+    state = get_state()
+    try:
+        create_resp = await create_file(CreateFileRequest(path=request.path, size=request.size))
+        inode_num = create_resp.inode_number
+        file_blocks = state.fat.get_file_blocks(inode_num)
+
+        crash_report = state.crash_simulator.inject_incomplete_write(
+            state.disk,
+            file_blocks=file_blocks,
+            completion_percentage=request.completion_percentage
+        )
+
+        # Surface unwritten blocks as corrupted so the UI can visualize the crash.
+        unwritten = crash_report.get("blocks_unwritten", [])
+        if not hasattr(state.disk, "corrupted_blocks"):
+            state.disk.corrupted_blocks = set()
+        state.disk.corrupted_blocks.update(unwritten)
+
+        tx_id = state.journal.begin_transaction("CRASH", {
+            "crash_type": "power-fail-write",
+            "path": request.path,
+            "inode": inode_num,
+            "blocks_unwritten": len(unwritten),
+        })
+        state.journal.commit_transaction(tx_id)
+
+        # Keep a replayable journal entry so journal-replay can finish writes.
+        replay_tx = state.journal.begin_transaction("INCOMPLETE_WRITE", {
+            "path": request.path,
+            "inode": inode_num,
+            "completion_percentage": request.completion_percentage,
+            "blocks_unwritten": unwritten,
+        })
+        state.journal.add_redo_data(replay_tx, {
+            "path": request.path,
+            "inode": inode_num,
+            "blocks_unwritten": unwritten,
+            "fill_byte": 171,
+        })
+
+        state.refresh_recovery_components()
+        return {
+            "success": True,
+            "inode_number": inode_num,
+            "message": (
+                f"Created '{request.path}' with simulated power-fail write: "
+                f"{len(unwritten)} block(s) left unwritten"
+            ),
+            "crash_report": crash_report,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create file with simulated power failure: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)

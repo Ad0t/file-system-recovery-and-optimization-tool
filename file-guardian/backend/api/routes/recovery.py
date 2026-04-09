@@ -9,6 +9,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, status
 
 from api.state import get_state
+from core.inode import Inode
 from api.schemas.recovery import (
     JournalEntryResponse,
     JournalStatusResponse,
@@ -275,6 +276,82 @@ async def journal_checkpoint():
         return {"success": success, "message": "Journal checkpoint completed" if success else "Checkpoint failed"}
     except Exception as e:
         logger.error(f"Failed to checkpoint journal: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.post("/journal/replay-incomplete-writes")
+async def replay_incomplete_writes():
+    """
+    Replay pending/recorded incomplete writes from the journal.
+    """
+    state = get_state()
+    try:
+        replayed = 0
+        skipped = 0
+        errors = []
+
+        for entry in getattr(state.journal, "entries", []):
+            operation = getattr(entry, "operation", "")
+            status = getattr(entry, "status", "")
+            if operation != "INCOMPLETE_WRITE":
+                continue
+            if status not in ("PENDING", "COMMITTED"):
+                skipped += 1
+                continue
+
+            metadata = getattr(entry, "metadata", {}) or {}
+            redo_data = getattr(entry, "redo_data", {}) or {}
+            blocks_unwritten = (
+                redo_data.get("blocks_unwritten")
+                or metadata.get("blocks_unwritten")
+                or []
+            )
+            if not isinstance(blocks_unwritten, list) or not blocks_unwritten:
+                skipped += 1
+                continue
+
+            fill_byte = int(redo_data.get("fill_byte", 0xAB)) & 0xFF
+            pattern = bytes([fill_byte]) * state.disk.block_size
+
+            try:
+                for block_num in blocks_unwritten:
+                    state.disk.write_block(int(block_num), pattern)
+                if hasattr(state.disk, "corrupted_blocks"):
+                    state.disk.corrupted_blocks.difference_update(set(blocks_unwritten))
+                entry.status = "COMPLETED"
+                replayed += 1
+            except Exception as write_err:
+                errors.append(str(write_err))
+
+        state.refresh_recovery_components()
+
+        success = len(errors) == 0
+        message = f"Replayed {replayed} incomplete write transaction(s)"
+
+        # Journal the replay operation
+        try:
+            tx_id = state.journal.begin_transaction("REPLAY_JOURNAL", {
+                "success": success,
+                "replayed_entries": replayed,
+                "skipped_entries": skipped,
+                "error_count": len(errors),
+            })
+            state.journal.commit_transaction(tx_id)
+        except Exception:
+            logger.error("Failed to journal REPLAY_JOURNAL outcome", exc_info=True)
+
+        return {
+            "success": success,
+            "replayed_entries": replayed,
+            "skipped_entries": skipped,
+            "errors": errors,
+            "message": message,
+        }
+    except Exception as e:
+        logger.error(f"Failed to replay incomplete writes: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -592,6 +669,19 @@ async def recover_from_journal():
         # Refresh recovery components before recovery
         state.refresh_recovery_components()
         result = state.recovery_manager.recover_from_journal()
+
+        # Journal high-level recovery outcome
+        try:
+            tx_id = state.journal.begin_transaction("RECOVER_JOURNAL", {
+                "success": result.get("success", False),
+                "recovered_transactions": len(result.get("recovered_transactions", [])),
+                "rolled_back_transactions": len(result.get("rolled_back_transactions", [])),
+                "recovery_time": result.get("recovery_time", 0.0),
+            })
+            state.journal.commit_transaction(tx_id)
+        except Exception:
+            logger.error("Failed to journal RECOVER_JOURNAL outcome", exc_info=True)
+
         return RecoveryResponse(**result)
     except Exception as e:
         logger.error(f"Failed to recover: {e}")
@@ -865,7 +955,7 @@ async def recover_with_redundancy(request: RedundancyRecoveryRequest):
 
 
 @router.post("/fsck")
-async def perform_fsck(auto_repair: bool = False):
+async def perform_fsck(auto_repair: bool = False, quarantine_orphans: bool = False):
     """
     Perform file system consistency check (fsck).
 
@@ -878,6 +968,115 @@ async def perform_fsck(auto_repair: bool = False):
     state = get_state()
     try:
         result = state.recovery_manager.perform_fsck(auto_repair=auto_repair)
+
+        quarantined_files = []
+        if quarantine_orphans:
+            # Ensure /lost+found exists
+            state.directory_tree.create_directory("/lost+found")
+            orphaned_inodes = result.get("orphaned_inodes", [])
+
+            for idx, orphan_inode in enumerate(orphaned_inodes, start=1):
+                blocks = state.fat.get_file_blocks(orphan_inode) if hasattr(state.fat, "get_file_blocks") else []
+                if not blocks:
+                    continue
+
+                # Move orphaned chain ownership to a recovered file.
+                state.fat.deallocate(orphan_inode)
+                recovered_inode = state.get_next_inode_number()
+                inode = Inode(recovered_inode, file_type="file", size=len(blocks) * state.disk.block_size)
+                for b in blocks[:12]:
+                    inode.add_block_pointer(b, "direct")
+
+                recovered_name = f"recovered_file_{idx:03d}.bin"
+                recovered_path = f"/lost+found/{recovered_name}"
+                created = state.directory_tree.create_file(recovered_path, inode)
+                if not created:
+                    continue
+
+                state.fat.allocate(recovered_inode, blocks)
+                if hasattr(state.fsm, "bitmap"):
+                    for b in blocks:
+                        state.fsm.bitmap[b] = 1
+                quarantined_files.append(recovered_path)
+
+            # Also quarantine leaked allocated blocks that are not owned by FAT.
+            leaked_blocks = sorted(result.get("blocks_marked_allocated_but_free", []))
+            if leaked_blocks:
+                chains = []
+                current_chain = [leaked_blocks[0]]
+                for b in leaked_blocks[1:]:
+                    if b == current_chain[-1] + 1:
+                        current_chain.append(b)
+                    else:
+                        chains.append(current_chain)
+                        current_chain = [b]
+                chains.append(current_chain)
+
+                for chain_idx, chain in enumerate(chains, start=len(quarantined_files) + 1):
+                    recovered_inode = state.get_next_inode_number()
+                    inode = Inode(recovered_inode, file_type="file", size=len(chain) * state.disk.block_size)
+                    for b in chain[:12]:
+                        inode.add_block_pointer(b, "direct")
+
+                    recovered_name = f"recovered_file_{chain_idx:03d}.bin"
+                    recovered_path = f"/lost+found/{recovered_name}"
+                    created = state.directory_tree.create_file(recovered_path, inode)
+                    if not created:
+                        continue
+
+                    # Force-link these blocks to the recovered inode
+                    state.fat.file_to_blocks[recovered_inode] = list(chain)
+                    if hasattr(state.fat, "file_to_method"):
+                        state.fat.file_to_method[recovered_inode] = state.fat.allocation_method
+                    for b in chain:
+                        state.fat.block_to_file[b] = recovered_inode
+                        if hasattr(state.fsm, "bitmap"):
+                            state.fsm.bitmap[b] = 1
+
+                    quarantined_files.append(recovered_path)
+
+            result["quarantined_files"] = quarantined_files
+            result["quarantine_dir"] = "/lost+found"
+            result["quarantine_message"] = (
+                f"Quarantined {len(quarantined_files)} orphan chain(s) to /lost+found"
+                if quarantined_files
+                else "No orphan chains detected to quarantine"
+            )
+
+        # Compute a simple severity percentage based on issue counts vs total blocks
+        try:
+            total_blocks = getattr(state.disk, "total_blocks", 1024)
+        except Exception:
+            total_blocks = 1024
+
+        issue_counts = [
+            len(result.get("orphaned_inodes", [])),
+            len(result.get("blocks_marked_free_but_allocated", [])),
+            len(result.get("blocks_marked_allocated_but_free", [])),
+            len(result.get("invalid_directory_entries", [])),
+            len(result.get("circular_references", [])),
+            len(result.get("inode_link_count_mismatches", [])),
+        ]
+        total_issues = sum(issue_counts)
+        severity_pct = (total_issues / max(1, total_blocks)) * 100.0
+        result["severity_pct"] = severity_pct
+
+        # Journal the fsck / auto-repair / quarantine summary
+        try:
+            tx_id = state.journal.begin_transaction("FSCK", {
+                "auto_repair": auto_repair,
+                "quarantine_orphans": quarantine_orphans,
+                "total_issues": total_issues,
+                "severity_pct": severity_pct,
+                "orphaned_inodes": len(result.get("orphaned_inodes", [])),
+                "blocks_marked_free_but_allocated": len(result.get("blocks_marked_free_but_allocated", [])),
+                "blocks_marked_allocated_but_free": len(result.get("blocks_marked_allocated_but_free", [])),
+                "quarantined_files": len(result.get("quarantined_files", [])) if quarantine_orphans else 0,
+            })
+            state.journal.commit_transaction(tx_id)
+        except Exception:
+            logger.error("Failed to journal FSCK summary", exc_info=True)
+
         return result
     except Exception as e:
         logger.error(f"Failed to perform fsck: {e}")
@@ -897,7 +1096,13 @@ from pydantic import BaseModel, Field
 class SimpleCrashRequest(BaseModel):
     """Simple crash request matching the frontend ControlPanel."""
     severity: float = Field(0.3, ge=0.0, le=1.0, description="Crash severity (0-1)")
-    crash_type: str = Field("power-failure", description="power-failure, kernel-panic, or disk-error")
+    crash_type: str = Field(
+        "physical-layer",
+        description=(
+            "One of: physical-layer, structural-layer, "
+            "transactional-layer, scenario-based"
+        ),
+    )
 
 
 @router.post("/crash/simple")
@@ -927,33 +1132,23 @@ async def simple_crash(request: SimpleCrashRequest):
                 pass
 
         if not allocated_blocks:
+            severity_pct = request.severity * 100.0
             return {
                 "success": True,
                 "crash_type": request.crash_type,
                 "corrupted_blocks": 0,
                 "affected_files": 0,
+                "severity_pct": severity_pct,
                 "message": "No blocks to corrupt",
             }
 
         corrupted_blocks = []
         affected_files = set()
 
-        if request.crash_type == "power-failure":
-            # Random block corruption
-            num_corrupt = max(1, int(len(allocated_blocks) * request.severity * 0.5))
-            targets = random.sample(allocated_blocks, min(num_corrupt, len(allocated_blocks)))
-            for block_num in targets:
-                # Corrupt the block data
-                corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
-                disk.write_block(block_num, corrupt_data)
-                corrupted_blocks.append(block_num)
-                # Track affected files
-                if hasattr(fat, 'block_to_file') and block_num in fat.block_to_file:
-                    affected_files.add(fat.block_to_file[block_num])
-
-        elif request.crash_type == "kernel-panic":
-            # More aggressive corruption
-            num_corrupt = max(1, int(len(allocated_blocks) * request.severity * 0.7))
+        if request.crash_type in ("physical-layer", "power-failure"):
+            # Physical layer: power failure + sector failure + bit corruption
+            # Phase 1 – random scattered block corruption (bit flips / power loss)
+            num_corrupt = max(1, int(len(allocated_blocks) * request.severity * 0.55))
             targets = random.sample(allocated_blocks, min(num_corrupt, len(allocated_blocks)))
             for block_num in targets:
                 corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
@@ -961,30 +1156,111 @@ async def simple_crash(request: SimpleCrashRequest):
                 corrupted_blocks.append(block_num)
                 if hasattr(fat, 'block_to_file') and block_num in fat.block_to_file:
                     affected_files.add(fat.block_to_file[block_num])
+            # Phase 2 – contiguous sector failure
+            sector_size = max(2, int(request.severity * 12))
+            sector_start = random.randint(4, max(4, disk.total_blocks - sector_size - 1))
+            for i in range(sector_start, min(sector_start + sector_size, disk.total_blocks)):
+                corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
+                disk.write_block(i, corrupt_data)
+                corrupted_blocks.append(i)
+                if hasattr(fat, 'block_to_file') and i in fat.block_to_file:
+                    affected_files.add(fat.block_to_file[i])
 
-        elif request.crash_type == "disk-error":
-            # Contiguous region corruption
-            if allocated_blocks:
-                region_start = random.choice(allocated_blocks)
-                region_size = max(5, int(request.severity * 40))
-                for i in range(region_start, min(region_start + region_size, disk.total_blocks)):
-                    if i in allocated_blocks or i >= 4:
-                        corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
-                        disk.write_block(i, corrupt_data)
-                        corrupted_blocks.append(i)
-                        if hasattr(fat, 'block_to_file') and i in fat.block_to_file:
-                            affected_files.add(fat.block_to_file[i])
+        elif request.crash_type in ("structural-layer", "kernel-panic"):
+            # Structural layer: metadata + directory tree + allocation table corruption
+            # Corrupts blocks AND removes FAT mappings so chains visually break
+            num_corrupt = max(1, int(len(allocated_blocks) * request.severity * 0.6))
+            targets = random.sample(allocated_blocks, min(num_corrupt, len(allocated_blocks)))
+            for block_num in targets:
+                corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
+                disk.write_block(block_num, corrupt_data)
+                corrupted_blocks.append(block_num)
+                if hasattr(fat, 'block_to_file') and block_num in fat.block_to_file:
+                    inode_num = fat.block_to_file[block_num]
+                    affected_files.add(inode_num)
+                    # Break metadata: remove the block from FAT chains
+                    try:
+                        fat.block_to_file.pop(block_num, None)
+                        if inode_num in fat.file_to_blocks:
+                            fat.file_to_blocks[inode_num] = [
+                                b for b in fat.file_to_blocks[inode_num] if b != block_num
+                            ]
+                    except Exception:
+                        pass
 
-        # Mark corrupted blocks in the disk metadata if available
+        elif request.crash_type in ("transactional-layer", "disk-error"):
+            # Transactional layer: journal + transaction + incomplete write
+            # Fewer blocks corrupted but targets journal-adjacent data
+            num_corrupt = max(1, int(len(allocated_blocks) * request.severity * 0.4))
+            targets = random.sample(allocated_blocks, min(num_corrupt, len(allocated_blocks)))
+            for block_num in targets:
+                corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
+                disk.write_block(block_num, corrupt_data)
+                corrupted_blocks.append(block_num)
+                if hasattr(fat, 'block_to_file') and block_num in fat.block_to_file:
+                    affected_files.add(fat.block_to_file[block_num])
+            # Incomplete-write effect: free the last quarter of affected blocks
+            tail_start = max(0, int(len(corrupted_blocks) * 0.75))
+            for block_num in corrupted_blocks[tail_start:]:
+                try:
+                    fsm.deallocate_blocks([block_num])
+                    fat.block_to_file.pop(block_num, None)
+                except Exception:
+                    pass
+
+        elif request.crash_type == "scenario-based":
+            # Cascading failure: physical shock → structural cascade → sector sweep
+            # Phase 1 – physical shock (scattered)
+            phase1_count = max(1, int(len(allocated_blocks) * request.severity * 0.3))
+            shuffled = random.sample(allocated_blocks, min(phase1_count, len(allocated_blocks)))
+            for block_num in shuffled:
+                corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
+                disk.write_block(block_num, corrupt_data)
+                corrupted_blocks.append(block_num)
+                if hasattr(fat, 'block_to_file') and block_num in fat.block_to_file:
+                    affected_files.add(fat.block_to_file[block_num])
+            # Phase 2 – structural cascade (break FAT chains)
+            remaining = [b for b in allocated_blocks if b not in corrupted_blocks]
+            phase2_count = max(1, int(len(remaining) * request.severity * 0.25))
+            phase2_targets = random.sample(remaining, min(phase2_count, len(remaining)))
+            for block_num in phase2_targets:
+                corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
+                disk.write_block(block_num, corrupt_data)
+                corrupted_blocks.append(block_num)
+                if hasattr(fat, 'block_to_file') and block_num in fat.block_to_file:
+                    inode_num = fat.block_to_file[block_num]
+                    affected_files.add(inode_num)
+                    try:
+                        fat.block_to_file.pop(block_num, None)
+                        if inode_num in fat.file_to_blocks:
+                            fat.file_to_blocks[inode_num] = [
+                                b for b in fat.file_to_blocks[inode_num] if b != block_num
+                            ]
+                    except Exception:
+                        pass
+            # Phase 3 – sector sweep (contiguous region)
+            region_size = max(5, int(request.severity * 30))
+            region_start = random.randint(4, max(4, disk.total_blocks - region_size - 1))
+            for i in range(region_start, min(region_start + region_size, disk.total_blocks)):
+                corrupt_data = bytes(random.getrandbits(8) for _ in range(disk.block_size))
+                disk.write_block(i, corrupt_data)
+                corrupted_blocks.append(i)
+                if hasattr(fat, 'block_to_file') and i in fat.block_to_file:
+                    affected_files.add(fat.block_to_file[i])
+
+        # Deduplicate and register corrupted blocks with the disk
+        corrupted_blocks = list(set(corrupted_blocks))
         if hasattr(disk, 'corrupted_blocks'):
             disk.corrupted_blocks.update(corrupted_blocks)
         else:
             disk.corrupted_blocks = set(corrupted_blocks)
 
-        # Journal the crash
+        # Journal the crash with severity percentage
+        severity_pct = request.severity * 100.0
         tx_id = state.journal.begin_transaction("CRASH", {
             "crash_type": request.crash_type,
             "severity": request.severity,
+            "severity_pct": severity_pct,
             "corrupted_blocks": len(corrupted_blocks),
         })
         state.journal.commit_transaction(tx_id)
@@ -996,7 +1272,8 @@ async def simple_crash(request: SimpleCrashRequest):
             "crash_type": request.crash_type,
             "corrupted_blocks": len(corrupted_blocks),
             "affected_files": len(affected_files),
-            "message": f"{request.crash_type}: {len(corrupted_blocks)} blocks corrupted, {len(affected_files)} files affected",
+            "severity_pct": severity_pct,
+            "message": f"{request.crash_type}: {len(corrupted_blocks)} blocks corrupted, {len(affected_files)} files affected (severity={severity_pct:.1f}%)",
         }
     except Exception as e:
         logger.error(f"Failed to simulate crash: {e}", exc_info=True)
@@ -1022,25 +1299,65 @@ async def simple_recover():
         recovered_blocks = 0
         affected_files = set()
 
+        # Build corrupted block set from both explicit metadata and physical markers.
+        corrupted = set(getattr(disk, 'corrupted_blocks', set()) or set())
+        if hasattr(disk, "read_block"):
+            for block_num in range(4, disk.total_blocks):
+                try:
+                    data = disk.read_block(block_num)
+                    if isinstance(data, (bytes, bytearray)) and b"CORRUPTED" in data:
+                        corrupted.add(block_num)
+                except Exception:
+                    pass
+
+        # Identify affected files BEFORE mutating mappings.
+        if hasattr(fat, "file_to_blocks"):
+            for inode_num, blocks in list(fat.file_to_blocks.items()):
+                if isinstance(blocks, list) and any(b in corrupted for b in blocks):
+                    affected_files.add(inode_num)
+
         # Find and clean corrupted blocks
-        corrupted = getattr(disk, 'corrupted_blocks', set())
         for block_num in list(corrupted):
             # Clear the block
             disk.write_block(block_num, bytes(disk.block_size))
             # Free the block in FSM
             try:
-                fsm.deallocate_blocks([block_num])
+                if hasattr(fsm, "bitmap"):
+                    fsm.bitmap[block_num] = 0
+                else:
+                    fsm.deallocate_blocks([block_num])
             except Exception:
                 pass
-            # Track affected files
-            if hasattr(fat, 'block_to_file') and block_num in fat.block_to_file:
-                affected_files.add(fat.block_to_file[block_num])
+            # Defensive cleanup of single-block ownership map
+            if hasattr(fat, 'block_to_file'):
+                fat.block_to_file.pop(block_num, None)
             recovered_blocks += 1
 
         # Remove affected files from FAT
         for inode_num in affected_files:
             try:
-                fat.deallocate(inode_num)
+                freed_blocks = fat.deallocate(inode_num)
+                # Ensure all blocks from deleted files are released in FSM/disk,
+                # not only the explicitly corrupted subset.
+                if freed_blocks:
+                    try:
+                        if hasattr(fsm, "bitmap"):
+                            for b in freed_blocks:
+                                fsm.bitmap[b] = 0
+                        else:
+                            # Fallback for alternate FSM implementations
+                            for b in freed_blocks:
+                                try:
+                                    fsm.deallocate_blocks([b])
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    for b in freed_blocks:
+                        try:
+                            disk.write_block(b, bytes(disk.block_size))
+                        except Exception:
+                            pass
             except Exception:
                 pass
 

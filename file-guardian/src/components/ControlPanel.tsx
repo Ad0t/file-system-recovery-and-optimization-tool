@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
 import {
-  FilePlus, FolderPlus, Skull, ShieldCheck, Layers, Zap, Search, Trash2
+  FilePlus, FolderPlus, Skull, ShieldCheck, Layers, Zap, Search, Trash2, History, Archive
 } from 'lucide-react';
 import { AllocationStrategy, FreeSpaceStrategy, CrashType } from '@/lib/fileSystem';
 
@@ -14,11 +15,16 @@ interface ControlPanelProps {
   onRecover: () => void;
   onDefragment: () => void;
   onFsck: (autoRepair?: boolean) => void;
+  onQuarantineOrphans: () => void;
+  onReplayJournal: () => void;
   onBenchmark: (fileSize: number) => void;
+  simulateCrashOnNextWrite: boolean;
+  onToggleSimulateCrashOnNextWrite: (enabled: boolean) => void;
 }
 
 export default function ControlPanel({
-  onCreateFile, onCreateDir, onCrash, onRecover, onDefragment, onFsck, onBenchmark,
+  onCreateFile, onCreateDir, onCrash, onRecover, onDefragment, onFsck, onQuarantineOrphans, onReplayJournal, onBenchmark,
+  simulateCrashOnNextWrite, onToggleSimulateCrashOnNextWrite,
 }: ControlPanelProps) {
   const [fileName, setFileName] = useState('');
   const [fileSize, setFileSize] = useState(4);
@@ -26,7 +32,7 @@ export default function ControlPanel({
   const [allocStrategy, setAllocStrategy] = useState<AllocationStrategy>('contiguous');
   const [freeStrategy, setFreeStrategy] = useState<FreeSpaceStrategy>('first-fit');
   const [crashSeverity, setCrashSeverity] = useState([0.3]);
-  const [crashType, setCrashType] = useState<CrashType>('power-failure');
+  const [crashType, setCrashType] = useState<CrashType>('physical-layer');
   const [benchSize, setBenchSize] = useState(8);
 
   const handleCreateFile = () => {
@@ -99,6 +105,13 @@ export default function ControlPanel({
             { value: 'worst-fit', label: 'Worst-Fit' },
           ], freeStrategy, v => setFreeStrategy(v as FreeSpaceStrategy))}
         </div>
+        <div className="flex items-center justify-between rounded border border-border/70 px-2 py-1.5">
+          <span className="text-[10px] text-muted-foreground">Simulate Crash on Next Write</span>
+          <Switch
+            checked={simulateCrashOnNextWrite}
+            onCheckedChange={onToggleSimulateCrashOnNextWrite}
+          />
+        </div>
         <Button size="sm" className="w-full h-7 text-xs" onClick={handleCreateFile}>
           <FilePlus className="w-3 h-3 mr-1" /> Create File
         </Button>
@@ -122,9 +135,10 @@ export default function ControlPanel({
         <div className="space-y-1">
           <p className="text-[10px] text-muted-foreground">Type:</p>
           {strategyBtns([
-            { value: 'power-failure', label: 'Power' },
-            { value: 'kernel-panic', label: 'Kernel' },
-            { value: 'disk-error', label: 'Disk' },
+            { value: 'physical-layer',     label: 'Physical' },
+            { value: 'structural-layer',   label: 'Structural' },
+            { value: 'transactional-layer', label: 'Transactional' },
+            { value: 'scenario-based',     label: 'Cascading' },
           ], crashType, v => setCrashType(v as CrashType))}
         </div>
         <div className="flex items-center gap-2">
@@ -132,26 +146,68 @@ export default function ControlPanel({
           <Slider value={crashSeverity} min={0.1} max={0.8} step={0.05} onValueChange={setCrashSeverity} className="flex-1" />
         </div>
         <div className="flex gap-1.5">
-          <Button size="sm" variant="destructive" className="flex-1 h-7 text-xs" onClick={() => onCrash(crashSeverity[0], crashType)}>
+          <Button
+            size="sm"
+            variant="destructive"
+            className="flex-1 h-7 text-xs"
+            onClick={() => onCrash(crashSeverity[0], crashType)}
+            title="Inject simulated crash corruption"
+          >
             <Skull className="w-3 h-3 mr-1" /> Crash
           </Button>
-          <Button size="sm" variant="outline" className="flex-1 h-7 text-xs" onClick={onRecover}>
-            <ShieldCheck className="w-3 h-3 mr-1" /> Recover
+          <Button
+            size="sm"
+            variant="outline"
+            className="flex-1 h-7 text-xs"
+            onClick={onRecover}
+            title="Recover from crash; may remove corrupted files/blocks"
+          >
+            <ShieldCheck className="w-3 h-3 mr-1" /> Recover Crash
           </Button>
         </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full h-7 text-xs"
+          onClick={onReplayJournal}
+          title="Replay journal entries for incomplete writes (undo/redo path)"
+        >
+          <History className="w-3 h-3 mr-1" /> Replay Journal
+        </Button>
       </div>
 
       {/* fsck */}
       <div className="rounded-lg border border-info/30 bg-info/5 p-3 space-y-2">
         <p className="text-xs text-info font-medium">File System Check</p>
         <div className="flex gap-1.5">
-          <Button size="sm" variant="outline" className="flex-1 h-7 text-xs" onClick={() => onFsck(false)}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="flex-1 h-7 text-xs"
+            onClick={() => onFsck(false)}
+            title="Scan for file system consistency issues"
+          >
             <Search className="w-3 h-3 mr-1" /> Scan
           </Button>
-          <Button size="sm" variant="outline" className="flex-1 h-7 text-xs" onClick={() => onFsck(true)}>
-            <Trash2 className="w-3 h-3 mr-1" /> Auto-Repair
+          <Button
+            size="sm"
+            variant="outline"
+            className="flex-1 h-7 text-xs"
+            onClick={() => onFsck(true)}
+            title="Repair FAT/FSM allocation bitmap mismatches only"
+          >
+            <Trash2 className="w-3 h-3 mr-1" /> Auto-Repair (fsck)
           </Button>
         </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full h-7 text-xs"
+          onClick={onQuarantineOrphans}
+          title="Move orphaned inode chains into /lost+found for manual inspection"
+        >
+          <Archive className="w-3 h-3 mr-1" /> Quarantine Orphans
+        </Button>
       </div>
 
       {/* Optimization */}

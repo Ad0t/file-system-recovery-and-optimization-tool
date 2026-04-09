@@ -57,7 +57,11 @@ def _build_disk_blocks(state) -> List[Dict[str, Any]]:
         if hasattr(fat, 'block_to_file') and i in fat.block_to_file:
             inode_num = fat.block_to_file[i]
             file_id = f"inode_{inode_num}"
-            alloc_strategy = fat.allocation_method
+            alloc_strategy = (
+                fat.get_file_allocation_method(inode_num)
+                if hasattr(fat, "get_file_allocation_method")
+                else fat.allocation_method
+            )
 
             # Get fragment index
             if inode_num in fat.file_to_blocks:
@@ -65,7 +69,7 @@ def _build_disk_blocks(state) -> List[Dict[str, Any]]:
                 if i in file_blocks:
                     fragment = file_blocks.index(i)
                     # Linked allocation: set next_block pointer
-                    if fat.allocation_method == "linked" and fragment < len(file_blocks) - 1:
+                    if alloc_strategy == "linked" and fragment < len(file_blocks) - 1:
                         next_block = file_blocks[fragment + 1]
 
         blocks.append({
@@ -152,7 +156,11 @@ def _build_files_and_dirs(state) -> tuple:
                     frag = gaps / (len(blocks) - 1)
 
                 # Determine allocation strategy
-                alloc_strategy = fat.allocation_method if hasattr(fat, 'allocation_method') else "contiguous"
+                alloc_strategy = (
+                    fat.get_file_allocation_method(inode_num)
+                    if hasattr(fat, "get_file_allocation_method")
+                    else (fat.allocation_method if hasattr(fat, 'allocation_method') else "contiguous")
+                )
 
                 # Compute block count as "size" for frontend
                 num_blocks = len(blocks) if blocks else (math.ceil(size / state.disk.block_size) if size > 0 else 0)
@@ -185,6 +193,31 @@ def _build_journal(state) -> List[Dict[str, Any]]:
     if not hasattr(journal, 'entries'):
         return entries
 
+    def _format_journal_details(op: str, metadata: Dict[str, Any]) -> str:
+        if op == "crash":
+            ctype = metadata.get("crash_type", "crash")
+            sev = metadata.get("severity_pct")
+            if sev is not None:
+                return f"{ctype} ({float(sev):.1f}% severity)"
+            return str(ctype)
+        if op == "recover":
+            recovered = metadata.get("recovered_blocks")
+            if recovered is not None:
+                return f"recovered {recovered} block(s)"
+            return "recovery completed"
+        if op == "fsck":
+            issues = metadata.get("total_issues")
+            if issues is not None:
+                return f"{issues} issue(s) checked"
+            return "consistency check"
+        if op == "create":
+            return "created"
+        if op == "delete":
+            return "deleted"
+        if op == "cache":
+            return "cache operation"
+        return op
+
     for i, entry in enumerate(reversed(journal.entries[-50:])):
         operation = "write"
         op_str = entry.operation.lower() if hasattr(entry, 'operation') else ""
@@ -204,7 +237,7 @@ def _build_journal(state) -> List[Dict[str, Any]]:
         committed = entry.status == "COMMITTED" if hasattr(entry, 'status') else True
         metadata = entry.metadata if hasattr(entry, 'metadata') else {}
         file_name = metadata.get("path", "") if isinstance(metadata, dict) else str(metadata)
-        details = str(metadata) if metadata else op_str
+        details = _format_journal_details(operation, metadata if isinstance(metadata, dict) else {})
 
         entries.append({
             "id": i + 1,

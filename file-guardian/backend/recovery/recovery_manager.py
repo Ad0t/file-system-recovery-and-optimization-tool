@@ -690,23 +690,37 @@ class RecoveryManager:
         orphaned_inodes = []
         blocks_marked_free_but_allocated = []
         blocks_marked_allocated_but_free = []
+        corrupted_blocks = []
         invalid_directory_entries = []
         circular_references = []
         inode_link_count_mismatches = []
+        repaired_corrupted_blocks = 0
+        repaired_damaged_inodes = 0
         
         # Tracking the mapping state difference as simple demonstration
         fat_blocks = set()
         if self.fat and hasattr(self.fat, 'file_to_blocks'):
-            for v in self.fat.file_to_blocks.values():
+            for inode_num, v in self.fat.file_to_blocks.items():
                 if isinstance(v, list):
                     fat_blocks.update(v)
                 else:
                     fat_blocks.add(v)
+                # Detect orphaned inode chains (allocated in FAT but not reachable
+                # from the directory tree namespace).
+                if self.directory_tree and hasattr(self.directory_tree, 'find_by_inode'):
+                    if self.directory_tree.find_by_inode(inode_num) is None:
+                        orphaned_inodes.append(inode_num)
                     
         fsm_blocks = {i for i, bit in enumerate(self.fsm.bitmap) if bit} if self.fsm and hasattr(self.fsm, 'bitmap') else set()
-        
-        blocks_marked_free_but_allocated = list(fat_blocks - fsm_blocks)
-        blocks_marked_allocated_but_free = list(fsm_blocks - fat_blocks)
+
+        # Reserved system blocks must remain allocated and should not be treated
+        # as unowned leaks just because FAT does not map them to file inodes.
+        reserved_blocks = set(range(4))
+        fat_blocks_effective = fat_blocks - reserved_blocks
+        fsm_blocks_effective = fsm_blocks - reserved_blocks
+
+        blocks_marked_free_but_allocated = list(fat_blocks_effective - fsm_blocks_effective)
+        blocks_marked_allocated_but_free = list(fsm_blocks_effective - fat_blocks_effective)
         
         if auto_repair:
             if self.fsm and hasattr(self.fsm, 'bitmap'):
@@ -716,21 +730,116 @@ class RecoveryManager:
                         
             if self.fsm and hasattr(self.fsm, 'bitmap'):
                 for b in blocks_marked_allocated_but_free:
+                    if b in reserved_blocks:
+                        continue
                     if self.fsm.bitmap[b] == 1:
                         self.fsm.bitmap[b] = 0
+
+                # Ensure reserved blocks are always allocated after repair.
+                for b in reserved_blocks:
+                    self.fsm.bitmap[b] = 1
                         
             # Mark issues resolved if auto_repair succeeded
             blocks_marked_free_but_allocated = []
             blocks_marked_allocated_but_free = []
+
+        # Crash corruption should be surfaced by fsck scan.
+        if self.disk and hasattr(self.disk, "corrupted_blocks"):
+            raw_corrupted = getattr(self.disk, "corrupted_blocks", set())
+            corrupted_blocks = sorted(list(raw_corrupted)) if raw_corrupted else []
+        # Also detect "physical crash" markers written directly to disk data.
+        if self.disk and hasattr(self.disk, "read_block"):
+            total_blocks = getattr(self.disk, "total_blocks", 1024)
+            for b in range(4, total_blocks):
+                try:
+                    data = self.disk.read_block(b)
+                    if isinstance(data, (bytes, bytearray)) and b"CORRUPTED" in data:
+                        corrupted_blocks.append(b)
+                except Exception:
+                    continue
+            if corrupted_blocks:
+                corrupted_blocks = sorted(set(corrupted_blocks))
+
+        if corrupted_blocks:
+            # Keep compatibility with existing UI aggregations by
+            # representing corruption as consistency issues.
+            invalid_directory_entries.extend(
+                [f"Corrupted block {b}" for b in corrupted_blocks]
+            )
+
+        if auto_repair and corrupted_blocks:
+            damaged_inodes = set()
+
+            for b in corrupted_blocks:
+                if b < 4:
+                    continue
+
+                # Clear block contents
+                try:
+                    if self.disk and hasattr(self.disk, "block_size") and hasattr(self.disk, "write_block"):
+                        self.disk.write_block(b, bytes(self.disk.block_size))
+                except Exception:
+                    pass
+
+                # Clear corruption metadata if present
+                if self.disk and hasattr(self.disk, "corrupted_blocks"):
+                    try:
+                        self.disk.corrupted_blocks.discard(b)
+                    except Exception:
+                        pass
+
+                # Remove from FAT ownership
+                owner = self.fat.block_to_file.get(b) if (self.fat and hasattr(self.fat, "block_to_file")) else None
+                if owner is not None:
+                    damaged_inodes.add(owner)
+                    try:
+                        self.fat.block_to_file.pop(b, None)
+                    except Exception:
+                        pass
+
+                if self.fat and hasattr(self.fat, "file_to_blocks"):
+                    for inode_num, blocks in list(self.fat.file_to_blocks.items()):
+                        if isinstance(blocks, list) and b in blocks:
+                            self.fat.file_to_blocks[inode_num] = [x for x in blocks if x != b]
+                            damaged_inodes.add(inode_num)
+
+                # Mark block free in bitmap
+                if self.fsm and hasattr(self.fsm, "bitmap"):
+                    try:
+                        self.fsm.bitmap[b] = 0
+                    except Exception:
+                        pass
+
+                repaired_corrupted_blocks += 1
+
+            # Drop empty file mappings after corrupted block removal
+            if self.fat and hasattr(self.fat, "file_to_blocks"):
+                for inode_num in list(self.fat.file_to_blocks.keys()):
+                    blocks = self.fat.file_to_blocks.get(inode_num, [])
+                    if isinstance(blocks, list) and len(blocks) == 0:
+                        self.fat.file_to_blocks.pop(inode_num, None)
+                        repaired_damaged_inodes += 1
+
+            # Keep reserved blocks protected
+            if self.fsm and hasattr(self.fsm, "bitmap"):
+                for b in range(4):
+                    self.fsm.bitmap[b] = 1
+
+            # Recompute post-repair corruption state for returned report
+            corrupted_blocks = []
+            invalid_directory_entries = []
             
         return {
             'orphaned_inodes': orphaned_inodes,
             'blocks_marked_free_but_allocated': blocks_marked_free_but_allocated,
             'blocks_marked_allocated_but_free': blocks_marked_allocated_but_free,
+            'corrupted_blocks': corrupted_blocks,
             'invalid_directory_entries': invalid_directory_entries,
             'circular_references': circular_references,
             'inode_link_count_mismatches': inode_link_count_mismatches,
-            'auto_repaired': auto_repair
+            'auto_repaired': auto_repair,
+            'repaired_corrupted_blocks': repaired_corrupted_blocks,
+            'repaired_damaged_inodes': repaired_damaged_inodes,
         }
 
     def recover_deleted_files(self, time_window: datetime = None) -> list:
