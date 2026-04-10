@@ -9,17 +9,17 @@ logger = logging.getLogger(__name__)
 class CacheManager:
     """
     Manages caching of disk blocks to optimize read/write performance.
-    Supports LRU, LFU, ARC, and 2Q caching strategies.
+    Supports LRU, LFU, and FIFO caching strategies.
     """
 
-    def __init__(self, disk: Any, cache_size: int = 100, strategy: str = 'LRU'):
+    def __init__(self, disk: Any, cache_size: int = 24, strategy: str = 'LRU'):
         """
         Initialize the CacheManager.
         
         Args:
             disk: Reference to disk component.
             cache_size (int): Maximum number of blocks to cache.
-            strategy (str): 'LRU', 'LFU', 'ARC', or '2Q'
+            strategy (str): 'LRU', 'LFU', or 'FIFO'
         """
         self.disk = disk
         self.cache_size = cache_size
@@ -47,9 +47,9 @@ class CacheManager:
         
         if hit:
             self.cache_hits += 1
-            if self.strategy in ('LRU', 'ARC', '2Q'):
+            if self.strategy == 'LRU':
                 self._update_lru(block_num)
-            if self.strategy in ('LFU', 'ARC'):
+            elif self.strategy == 'LFU':
                 self._update_lfu(block_num)
             return self.cache_data[block_num]
             
@@ -78,9 +78,9 @@ class CacheManager:
             
         if block_num in self.cache_data:
             self.cache_data[block_num] = data
-            if self.strategy in ('LRU', 'ARC', '2Q'):
+            if self.strategy == 'LRU':
                 self._update_lru(block_num)
-            if self.strategy in ('LFU', 'ARC'):
+            elif self.strategy == 'LFU':
                 self._update_lfu(block_num)
             self.entry_timestamps[block_num] = time.time()
             return True
@@ -92,9 +92,9 @@ class CacheManager:
                 self.eviction_count += 1
                 
         self.cache_data[block_num] = data
-        if self.strategy in ('LRU', 'ARC', '2Q'):
+        if self.strategy in ('LRU', 'FIFO'):
             self.access_order[block_num] = None
-        if self.strategy in ('LFU', 'ARC'):
+        elif self.strategy == 'LFU':
             self.access_frequency[block_num] = 1
             
         self.entry_timestamps[block_num] = time.time()
@@ -111,6 +111,12 @@ class CacheManager:
             return oldest_block
         except KeyError:
             return None
+
+    def evict_fifo(self) -> Optional[int]:
+        """
+        Evict first-in block. Shares mechanics with LRU base ordered dict.
+        """
+        return self.evict_lru()
 
     def evict_lfu(self) -> Optional[int]:
         """
@@ -240,7 +246,7 @@ class CacheManager:
         """
         Change caching strategy.
         """
-        valid_strategies = ['LRU', 'LFU', 'ARC', '2Q']
+        valid_strategies = ['LRU', 'LFU', 'FIFO']
         if new_strategy not in valid_strategies:
             logger.error(f"Invalid strategy: {new_strategy}")
             return False
@@ -254,24 +260,18 @@ class CacheManager:
         self.access_frequency.clear()
         
         for k in self.cache_data.keys():
-            if self.strategy in ('LRU', 'ARC', '2Q'):
+            if self.strategy in ('LRU', 'FIFO'):
                 self.access_order[k] = None
-            if self.strategy in ('LFU', 'ARC'):
+            elif self.strategy == 'LFU':
                 self.access_frequency[k] = 1
                 
-        # ARC and 2Q specific re-init
-        if self.strategy == 'ARC':
-            self.implement_arc()
-        elif self.strategy == '2Q':
-            self.implement_2q()
-            
         return True
 
     def get_cached_blocks(self) -> List[int]:
         """
         Return list of block numbers currently in cache.
         """
-        if self.strategy == 'LRU':
+        if self.strategy in ('LRU', 'FIFO'):
             return list(self.access_order.keys())
         elif self.strategy == 'LFU':
             # Highest read frequency first (educational / heatmap order); tie-break by block id.
@@ -316,35 +316,13 @@ class CacheManager:
             return self.evict_lru()
         elif self.strategy == 'LFU':
             return self.evict_lfu()
-        elif self.strategy in ('ARC', '2Q'):
-            return self.evict_lru()
+        elif self.strategy == 'FIFO':
+            return self.evict_fifo()
         return self.evict_lru()
 
     # --- ADVANCED CACHE MANAGER METHODS ---
 
-    def implement_arc(self) -> bool:
-        """
-        Implement Adaptive Replacement Cache (ARC).
-        """
-        self.strategy = 'ARC'
-        self.arc_t1 = OrderedDict()
-        self.arc_t2 = OrderedDict()
-        self.arc_b1 = OrderedDict()
-        self.arc_b2 = OrderedDict()
-        self.arc_p = 0
-        return True
 
-    def implement_2q(self) -> bool:
-        """
-        Implement 2Q cache algorithm.
-        """
-        self.strategy = '2Q'
-        self.queue_am = OrderedDict()
-        self.queue_a1in = OrderedDict()
-        self.queue_a1out = OrderedDict()
-        self.kin = int(self.cache_size * 0.25)
-        self.kout = int(self.cache_size * 0.5)
-        return True
 
     def predictive_prefetch(self, block_num: int, pattern: str = 'sequential') -> List[int]:
         """
@@ -477,7 +455,7 @@ class CacheManager:
         results = {}
         original_strategy = self.strategy
         
-        for strat in ['LRU', 'LFU', 'ARC', '2Q']:
+        for strat in ['LRU', 'LFU', 'FIFO']:
             self.clear_cache()
             self.set_strategy(strat)
             for b in access_sequence:

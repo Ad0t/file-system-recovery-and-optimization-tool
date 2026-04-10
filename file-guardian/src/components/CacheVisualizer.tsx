@@ -12,7 +12,7 @@ import {
 import { Activity, Gauge, RefreshCw, Trash2, TrendingDown, TrendingUp, Zap } from 'lucide-react';
 import { CacheStats as LiveCacheStats } from '@/lib/cache';
 
-type CacheAlgorithm = 'LRU' | 'LFU';
+type CacheAlgorithm = 'LRU' | 'LFU' | 'FIFO';
 
 export type CacheBlock = {
   blockNum: number;
@@ -167,6 +167,7 @@ export default function CacheVisualizer({
               <SelectContent>
                 <SelectItem value="LRU">Least Recently Used (LRU)</SelectItem>
                 <SelectItem value="LFU">Least Frequently Used (LFU)</SelectItem>
+                <SelectItem value="FIFO">First-In First-Out (FIFO)</SelectItem>
               </SelectContent>
             </Select>
           </div>
