@@ -15,6 +15,11 @@ export interface CacheStats {
   entries: CacheEntry[];
   maxSize: number;
   currentSize: number;
+  evictions?: number;
+  strategy?: string;
+  mostAccessedBlocks?: [number, number][];
+  cachedBlocks?: number[];
+  accessFrequency?: Record<string, number>;
 }
 
 export class CacheManager {

@@ -6,8 +6,7 @@ export type FreeSpaceStrategy = 'first-fit' | 'best-fit' | 'worst-fit';
 export type CrashType =
   | 'physical-layer'
   | 'structural-layer'
-  | 'transactional-layer'
-  | 'scenario-based';
+  | 'transactional-layer';
 
 export interface DiskBlock {
   id: number;
@@ -325,33 +324,7 @@ export function simulateCrash(disk: DiskBlock[], severity: number, crashType: Cr
       details = `Transactional layer: ${numCorrupt} blocks corrupted (journal + transaction + incomplete write)`;
       break;
     }
-    case 'scenario-based': {
-      // Scenario based: cascading failure — chain of physical + structural + transactional faults
-      const phase1 = Math.floor(usedBlocks.length * severity * 0.3);
-      const phase2 = Math.floor(usedBlocks.length * severity * 0.25);
-      const shuffled = [...usedBlocks].sort(() => Math.random() - 0.5);
-      // Phase 1 — physical shock
-      shuffled.slice(0, phase1).forEach(b => {
-        const idx = newDisk.findIndex(bl => bl.id === b.id);
-        if (b.fileId) corruptedFiles.add(b.fileId);
-        newDisk[idx] = { ...newDisk[idx], state: 'corrupted' };
-      });
-      // Phase 2 — structural cascade on remaining used blocks
-      shuffled.slice(phase1, phase1 + phase2).forEach(b => {
-        const idx = newDisk.findIndex(bl => bl.id === b.id);
-        if (b.fileId) corruptedFiles.add(b.fileId);
-        newDisk[idx] = { ...newDisk[idx], state: 'corrupted', nextBlock: null, fragment: -1 };
-      });
-      // Phase 3 — sector-level cascade: corrupt a contiguous region
-      const regionStart = Math.floor(Math.random() * (TOTAL_BLOCKS - 20)) + 4;
-      const regionSize = Math.floor(severity * 30) + 5;
-      for (let i = regionStart; i < Math.min(regionStart + regionSize, TOTAL_BLOCKS); i++) {
-        if (newDisk[i].fileId) corruptedFiles.add(newDisk[i].fileId!);
-        newDisk[i] = { ...newDisk[i], state: 'corrupted', nextBlock: null };
-      }
-      details = `Cascading failure: ${corruptedFiles.size} files affected across ${phase1 + phase2 + regionSize} blocks`;
-      break;
-    }
+
   }
 
   return { disk: newDisk, corruptedFiles: Array.from(corruptedFiles), crashDetails: details };

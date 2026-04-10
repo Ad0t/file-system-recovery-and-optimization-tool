@@ -7,7 +7,9 @@ for use across all API routes.
 """
 
 import logging
+import os
 import sys
+from pathlib import Path
 from typing import Dict, Any, Optional
 from threading import Lock
 
@@ -200,6 +202,69 @@ class FileSystemState:
             self.performance_analyzer = PerformanceAnalyzer(self.to_dict())
 
             logger.info("FileSystemState reset complete")
+
+    def factory_reset(self) -> Dict[str, Any]:
+        """
+        Perform a factory reset by deleting persisted artifacts and rebuilding
+        a pristine in-memory file system state.
+
+        Returns:
+            dict: Metadata about deleted persistence files.
+        """
+        with self._lock:
+            total_blocks = self.disk.total_blocks
+            block_size = self.disk.block_size
+            allocation_method = self.fat.allocation_method
+            allocation_strategy = self.fsm.allocation_strategy
+            journal_file = self.journal.journal_file
+
+            backend_root = Path(__file__).resolve().parents[1]
+            data_dir = backend_root / "data"
+
+            deleted_files = []
+            candidate_paths = set()
+
+            configured_journal = Path(journal_file)
+            if not configured_journal.is_absolute():
+                configured_journal = backend_root / configured_journal
+            candidate_paths.add(configured_journal)
+            candidate_paths.add(data_dir / "journal.log")
+            candidate_paths.add(data_dir / "disk.img")
+
+            if data_dir.exists():
+                for pattern in ("*.img", "*.bin", "*.disk", "*.pkl", "*.pickle"):
+                    for image_path in data_dir.glob(pattern):
+                        candidate_paths.add(image_path)
+
+            for file_path in candidate_paths:
+                try:
+                    if file_path.exists() and file_path.is_file():
+                        os.remove(file_path)
+                        deleted_files.append(str(file_path))
+                except OSError as exc:
+                    logger.warning("Failed to delete persistence file %s: %s", file_path, exc)
+
+            # Recreate all core modules with a fresh state.
+            self.disk = Disk(total_blocks=total_blocks, block_size=block_size)
+            self.directory_tree = DirectoryTree()
+            self.fat = FileAllocationTable(allocation_method=allocation_method)
+            self.fsm = FreeSpaceManager(
+                total_blocks=total_blocks, strategy=allocation_strategy
+            )
+            self.fsm.allocate_blocks(4, contiguous=True)
+            self.journal = Journal(journal_file=journal_file)
+
+            self.inode_counter = 1
+
+            components = self.to_dict()
+            self.recovery_manager = RecoveryManager(components)
+            self.defragmenter = Defragmenter(components)
+            self.cache_manager = CacheManager(self.disk)
+            self.crash_simulator = CrashSimulator()
+            self.performance_analyzer = PerformanceAnalyzer(components)
+
+            logger.info("Factory reset complete. Deleted %d persistence files", len(deleted_files))
+            return {"deleted_files": deleted_files}
 
 
 # Global state instance

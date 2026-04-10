@@ -176,7 +176,9 @@ class CacheManager:
             'hit_rate': self.get_hit_rate(),
             'most_accessed_blocks': top_10,
             'eviction_count': self.eviction_count,
-            'strategy': self.strategy
+            'strategy': self.strategy,
+            'cached_blocks': self.get_cached_blocks(),
+            'access_frequency': dict(self.access_frequency),
         }
 
     def prefetch(self, block_nums: List[int]) -> int:
@@ -272,7 +274,13 @@ class CacheManager:
         if self.strategy == 'LRU':
             return list(self.access_order.keys())
         elif self.strategy == 'LFU':
-            return [k for k, v in sorted(self.access_frequency.items(), key=lambda item: item[1])]
+            # Highest read frequency first (educational / heatmap order); tie-break by block id.
+            items = [
+                (b, self.access_frequency.get(b, 0))
+                for b in self.cache_data.keys()
+            ]
+            items.sort(key=lambda t: (-t[1], t[0]))
+            return [b for b, _ in items]
         else:
             return list(self.cache_data.keys())
 

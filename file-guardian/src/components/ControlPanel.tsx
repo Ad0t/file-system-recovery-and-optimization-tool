@@ -4,7 +4,19 @@ import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import {
-  FilePlus, FolderPlus, Skull, ShieldCheck, Layers, Zap, Search, Trash2, History, Archive
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
+import { useToast } from '@/components/ui/use-toast';
+import {
+  FilePlus, FolderPlus, Skull, ShieldCheck, Layers, Zap, Search, Trash2, History, Archive, AlertTriangle
 } from 'lucide-react';
 import { AllocationStrategy, FreeSpaceStrategy, CrashType } from '@/lib/fileSystem';
 
@@ -18,14 +30,17 @@ interface ControlPanelProps {
   onQuarantineOrphans: () => void;
   onReplayJournal: () => void;
   onBenchmark: (fileSize: number) => void;
+  onFactoryReset: () => Promise<boolean>;
   simulateCrashOnNextWrite: boolean;
   onToggleSimulateCrashOnNextWrite: (enabled: boolean) => void;
 }
 
 export default function ControlPanel({
   onCreateFile, onCreateDir, onCrash, onRecover, onDefragment, onFsck, onQuarantineOrphans, onReplayJournal, onBenchmark,
+  onFactoryReset,
   simulateCrashOnNextWrite, onToggleSimulateCrashOnNextWrite,
 }: ControlPanelProps) {
+  const { toast } = useToast();
   const [fileName, setFileName] = useState('');
   const [fileSize, setFileSize] = useState(4);
   const [dirName, setDirName] = useState('');
@@ -34,6 +49,7 @@ export default function ControlPanel({
   const [crashSeverity, setCrashSeverity] = useState([0.3]);
   const [crashType, setCrashType] = useState<CrashType>('physical-layer');
   const [benchSize, setBenchSize] = useState(8);
+  const [isResetting, setIsResetting] = useState(false);
 
   const handleCreateFile = () => {
     if (!fileName.trim()) return;
@@ -45,6 +61,28 @@ export default function ControlPanel({
     if (!dirName.trim()) return;
     onCreateDir(dirName.trim());
     setDirName('');
+  };
+
+  const handleFactoryReset = async () => {
+    if (isResetting) return;
+    setIsResetting(true);
+    try {
+      const ok = await onFactoryReset();
+      if (ok) {
+        toast({
+          title: 'Factory reset complete',
+          description: 'Disk, files, directories, and journal logs were wiped.',
+        });
+      } else {
+        toast({
+          variant: 'destructive',
+          title: 'Factory reset failed',
+          description: 'The simulator could not be reset. Check backend logs.',
+        });
+      }
+    } finally {
+      setIsResetting(false);
+    }
   };
 
   const strategyBtns = (
@@ -138,7 +176,6 @@ export default function ControlPanel({
             { value: 'physical-layer',     label: 'Physical' },
             { value: 'structural-layer',   label: 'Structural' },
             { value: 'transactional-layer', label: 'Transactional' },
-            { value: 'scenario-based',     label: 'Cascading' },
           ], crashType, v => setCrashType(v as CrashType))}
         </div>
         <div className="flex items-center gap-2">
@@ -222,6 +259,40 @@ export default function ControlPanel({
       <div className="flex items-center gap-2">
         <span className="text-[10px] text-muted-foreground w-20">Bench: {benchSize}B</span>
         <Slider value={[benchSize]} min={1} max={32} onValueChange={v => setBenchSize(v[0])} className="flex-1" />
+      </div>
+
+      <div className="rounded-lg border border-danger/30 bg-danger/5 p-3 space-y-2">
+        <p className="text-xs text-danger font-medium">Danger Zone</p>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button
+              size="sm"
+              variant="destructive"
+              className="w-full h-8 text-xs bg-red-600 hover:bg-red-700 text-white"
+            >
+              <AlertTriangle className="w-3 h-3 mr-1" /> Factory Reset
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Format simulator disk?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to format the disk? This will destroy all simulated files,
+                directories, and journal logs. This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-red-600 hover:bg-red-700 text-white"
+                onClick={handleFactoryReset}
+                disabled={isResetting}
+              >
+                {isResetting ? 'Resetting...' : 'Yes, Factory Reset'}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>
   );

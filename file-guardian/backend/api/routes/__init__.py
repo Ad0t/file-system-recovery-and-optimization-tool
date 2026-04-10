@@ -8,6 +8,7 @@ from .recovery import router as recovery_router
 from .optimization import router as optimization_router
 from .metrics import router as metrics_router
 from .state import router as state_router
+from .system import router as system_router
 
 __all__ = [
     "files_router",
@@ -16,4 +17,5 @@ __all__ = [
     "optimization_router",
     "metrics_router",
     "state_router",
+    "system_router",
 ]

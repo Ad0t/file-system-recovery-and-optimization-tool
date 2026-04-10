@@ -592,6 +592,76 @@ async def read_file(path: str):
         )
 
 
+@router.post("/{file_id}/read")
+async def read_file_via_cache(file_id: str):
+    """
+    Simulate reading a file by inode id through CacheManager.
+
+    This endpoint exists for interactive UI cache visualization. It resolves
+    a frontend file id like ``inode_42`` to allocated physical blocks, then
+    reads each block through cache_manager.get() so hit/miss statistics update.
+    """
+    state = get_state()
+    try:
+        inode_num: Optional[int] = None
+        if file_id.startswith("inode_"):
+            suffix = file_id.split("inode_", 1)[1]
+            if suffix.isdigit():
+                inode_num = int(suffix)
+        elif file_id.isdigit():
+            inode_num = int(file_id)
+
+        if inode_num is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid file id '{file_id}'"
+            )
+
+        node = state.directory_tree.find_by_inode(inode_num)
+        if node is None or node.is_directory:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"File '{file_id}' not found"
+            )
+
+        blocks = state.fat.get_file_blocks(inode_num) if hasattr(state.fat, "get_file_blocks") else []
+        if not blocks:
+            return {
+                "success": True,
+                "fileId": file_id,
+                "blocksRead": [],
+                "cacheStats": state.cache_manager.get_cache_stats(),
+                "message": "No blocks allocated for this file"
+            }
+
+        for block_num in blocks:
+            # Normal path: get() tracks hit/miss and caches non-empty data.
+            data = state.cache_manager.get(block_num)
+            # Some simulator-created files allocate blocks without writing bytes,
+            # so disk.read_block() can be None. Seed a zero-length payload so
+            # subsequent reads become cache hits for allocated blocks.
+            if data is None and not state.cache_manager.is_cached(block_num):
+                state.cache_manager.put(block_num, b"")
+
+        if node.inode:
+            node.inode.update_access_time()
+
+        return {
+            "success": True,
+            "fileId": file_id,
+            "blocksRead": blocks,
+            "cacheStats": state.cache_manager.get_cache_stats(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed cache-backed read for {file_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
 @router.get("/fat/status", response_model=FATStatusResponse)
 async def get_fat_status():
     """

@@ -93,6 +93,30 @@ export interface ApiCacheStats {
   entries: { fileId: string; fileName: string; accessCount: number; lastAccess: number; size: number }[];
   maxSize: number;
   currentSize: number;
+  evictions?: number;
+  strategy?: string;
+  mostAccessedBlocks?: [number, number][];
+  cachedBlocks?: number[];
+  accessFrequency?: Record<string, number>;
+}
+
+export interface ApiReadByFileIdResponse {
+  success: boolean;
+  fileId: string;
+  blocksRead: number[];
+  cacheStats: {
+    cache_size: number;
+    max_cache_size: number;
+    cache_hits: number;
+    cache_misses: number;
+    hit_rate: number;
+    most_accessed_blocks: [number, number][];
+    eviction_count: number;
+    strategy: string;
+    cached_blocks?: number[];
+    access_frequency?: Record<string, number>;
+  };
+  message?: string;
 }
 
 export interface ApiBenchmarkHistory {
@@ -142,6 +166,9 @@ export const apiCreateDirectory = (path: string) =>
 export const apiDeleteFile = (path: string, recursive = false) =>
   request<{ success: boolean }>('POST', '/fs/rm', { path, recursive });
 
+export const apiReadFileById = (fileId: string) =>
+  request<ApiReadByFileIdResponse>('POST', `/fs/${encodeURIComponent(fileId)}/read`);
+
 export const apiCrashDisk = (severity: number, crash_type: string) =>
   request<{ success: boolean; message: string }>('POST', '/recovery/crash/simple', { severity, crash_type });
 
@@ -169,8 +196,11 @@ export const apiSetCacheSize = (new_size: number) =>
 export const apiClearCache = () =>
   request<{ success: boolean }>('POST', '/metrics/cache/clear');
 
-export const apiResetFs = () =>
-  request<{ success: boolean }>('POST', '/fs/reset');
+export const apiSetCacheStrategy = (strategy: string) =>
+  request<{ success: boolean; strategy: string }>('POST', '/metrics/cache/strategy', { strategy });
+
+export const apiSystemReset = () =>
+  request<{ status: string; message: string }>('POST', '/system/reset');
 
 export const apiSetAllocationMethod = (method: string) =>
   request<{ success: boolean }>('POST', '/fs/fat/method', { method });

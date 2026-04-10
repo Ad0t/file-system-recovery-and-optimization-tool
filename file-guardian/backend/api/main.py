@@ -31,6 +31,7 @@ from .routes import (
     optimization_router,
     metrics_router,
     state_router,
+    system_router,
 )
 from .state import get_state
 
@@ -147,6 +148,7 @@ app.include_router(recovery_router, prefix="/api/v1")
 app.include_router(optimization_router, prefix="/api/v1")
 app.include_router(metrics_router, prefix="/api/v1")
 app.include_router(state_router, prefix="/api/v1")
+app.include_router(system_router, prefix="/api/v1")
 
 
 # Exception handlers

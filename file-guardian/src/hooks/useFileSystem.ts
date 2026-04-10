@@ -15,8 +15,8 @@ import { BenchmarkResult, BenchmarkHistory, runBenchmark, calculateBenchmarkHist
 import {
   fetchState, apiCreateFile, apiCreateDirectory, apiDeleteFile,
   apiCrashDisk, apiRecover, apiDefragment, apiFsck,
-  apiSetCacheSize, apiClearCache, apiSetAllocationMethod,
-  apiSetAllocationStrategy, apiCreateFileWithPowerFail, apiReplayJournal,
+  apiSetCacheSize, apiClearCache, apiSetCacheStrategy, apiSetAllocationMethod,
+  apiSetAllocationStrategy, apiCreateFileWithPowerFail, apiReplayJournal, apiSystemReset, apiReadFileById,
   ApiState,
 } from '@/lib/api';
 
@@ -80,6 +80,13 @@ export function useFileSystem() {
   const [lastFsckResult, setLastFsckResult] = useState<FsckResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [simulateCrashOnNextWrite, setSimulateCrashOnNextWrite] = useState(false);
+
+  type FileReadResult = {
+    fileName: string;
+    blocksRead: number[];
+    hits: number;
+    misses: number;
+  };
 
   // Track the current allocation method for benchmarks
   const currentAllocMethod = useRef<AllocationStrategy>('contiguous');
@@ -196,14 +203,42 @@ export function useFileSystem() {
     })();
   }, [files, refreshState]);
 
-  const accessFile = useCallback((fileId: string) => {
+  const accessFile = useCallback(async (fileId: string): Promise<FileReadResult | null> => {
     const file = files.get(fileId);
-    if (!file) return;
+    if (!file) return null;
 
     // Run a local benchmark for the access
     const bench = runBenchmark(file.size, file.fragmentation, file.allocationStrategy);
     setBenchmarkResults(prev => [bench, ...prev].slice(0, 100));
-    setLastAction(`Accessed "${file.name}"`);
+
+    try {
+      const result = await apiReadFileById(fileId);
+      const rawStats = result.cacheStats;
+      setCacheStats({
+        hits: rawStats.cache_hits,
+        misses: rawStats.cache_misses,
+        hitRate: rawStats.hit_rate,
+        entries: [],
+        maxSize: rawStats.max_cache_size,
+        currentSize: rawStats.cache_size,
+        evictions: rawStats.eviction_count,
+        strategy: rawStats.strategy,
+        mostAccessedBlocks: rawStats.most_accessed_blocks,
+        cachedBlocks: rawStats.cached_blocks || [],
+        accessFrequency: rawStats.access_frequency || {},
+      });
+      setLastAction(`Read "${file.name}" (${result.blocksRead.length} blocks)`);
+      return {
+        fileName: file.name,
+        blocksRead: result.blocksRead,
+        hits: rawStats.cache_hits,
+        misses: rawStats.cache_misses,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setLastAction(`Read failed for "${file.name}": ${msg}`);
+      return null;
+    }
   }, [files]);
 
   const createDirectory = useCallback((name: string, parentDir: string = 'root') => {
@@ -387,6 +422,19 @@ export function useFileSystem() {
     })();
   }, [refreshState]);
 
+  const setCacheStrategy = useCallback((strategy: 'LRU' | 'LFU') => {
+    (async () => {
+      try {
+        await apiSetCacheStrategy(strategy);
+        await refreshState();
+        setLastAction(`Cache strategy: ${strategy}`);
+      } catch (err) {
+        console.error('Failed to set cache strategy:', err);
+        setLastAction(`Cache strategy failed: ${err instanceof Error ? err.message : 'error'}`);
+      }
+    })();
+  }, [refreshState]);
+
   const runIOBenchmark = useCallback((fileSize: number) => {
     // Benchmarks run client-side using the current fragmentation value
     const frag = stats.fragmentation;
@@ -396,6 +444,25 @@ export function useFileSystem() {
     setLastAction(`Benchmark complete: ${fileSize} block test`);
   }, [stats.fragmentation]);
 
+  const factoryReset = useCallback(async (): Promise<boolean> => {
+    setLoading(true);
+    setLastAction('Factory reset in progress...');
+    try {
+      const result = await apiSystemReset();
+      setBenchmarkResults([]);
+      setLastFsckResult(null);
+      await refreshState();
+      setLastAction(result.message || 'File system factory reset complete.');
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setLastAction(`Factory reset failed: ${msg}`);
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  }, [refreshState]);
+
   const benchmarkHistory = calculateBenchmarkHistory(benchmarkResults);
 
   return {
@@ -404,7 +471,7 @@ export function useFileSystem() {
     createFile, deleteFile, accessFile, createDirectory, deleteDirectory,
     crashDisk, recover, defragment, runFsck,
     quarantineOrphans, replayJournal,
-    setCacheSize, clearCache, runIOBenchmark,
+    setCacheSize, clearCache, setCacheStrategy, runIOBenchmark, factoryReset,
     simulateCrashOnNextWrite, setSimulateCrashOnNextWrite,
   };
 }

@@ -286,13 +286,22 @@ def _build_cache_stats(state) -> Dict[str, Any]:
     """
     try:
         raw = state.cache_manager.get_cache_stats()
+        hits = raw.get("cache_hits", raw.get("hits", 0))
+        misses = raw.get("cache_misses", raw.get("misses", 0))
+        max_size = raw.get("max_cache_size", raw.get("maxSize", 64))
+        current_size = raw.get("cache_size", raw.get("current_entries", 0))
         return {
-            "hits": raw.get("hits", 0),
-            "misses": raw.get("misses", 0),
+            "hits": hits,
+            "misses": misses,
             "hitRate": raw.get("hit_rate", 0),
             "entries": [],
-            "maxSize": raw.get("cache_size", 64),
-            "currentSize": raw.get("current_entries", 0),
+            "maxSize": max_size,
+            "currentSize": current_size,
+            "evictions": raw.get("eviction_count", 0),
+            "strategy": raw.get("strategy", "LRU"),
+            "mostAccessedBlocks": raw.get("most_accessed_blocks", []),
+            "cachedBlocks": raw.get("cached_blocks", []),
+            "accessFrequency": raw.get("access_frequency", {}),
         }
     except Exception:
         return {
@@ -302,6 +311,11 @@ def _build_cache_stats(state) -> Dict[str, Any]:
             "entries": [],
             "maxSize": 64,
             "currentSize": 0,
+            "evictions": 0,
+            "strategy": "LRU",
+            "mostAccessedBlocks": [],
+            "cachedBlocks": [],
+            "accessFrequency": {},
         }
 
 

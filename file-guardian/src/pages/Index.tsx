@@ -6,19 +6,35 @@ import DirectoryTree from '@/components/DirectoryTree';
 import ControlPanel from '@/components/ControlPanel';
 import StatsBar from '@/components/StatsBar';
 import JournalLog from '@/components/JournalLog';
-import CachePanel from '@/components/CachePanel';
+import CacheVisualizer from '@/components/CacheVisualizer';
 import BenchmarkPanel from '@/components/BenchmarkPanel';
 import FsckPanel from '@/components/FsckPanel';
 import { Terminal } from 'lucide-react';
+import { useToast } from '@/components/ui/use-toast';
 
 const Index = () => {
   const fs = useFileSystem();
+  const { toast } = useToast();
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
-  const handleSelectFile = (fileId: string) => {
+  const handleSelectFile = async (fileId: string) => {
     setSelectedFile(fileId);
-    fs.accessFile(fileId);
+    const readResult = await fs.accessFile(fileId);
+    if (readResult) {
+      toast({
+        title: `Read ${readResult.fileName} (${readResult.blocksRead.length} Blocks)`,
+        description: `Hits: ${readResult.hits}, Misses: ${readResult.misses}`,
+      });
+    }
   };
+
+  const blockOwnerById: Record<number, string> = {};
+  fs.disk.forEach((block) => {
+    if (block.fileId) {
+      const file = fs.files.get(block.fileId);
+      blockOwnerById[block.id] = file?.name || block.fileId;
+    }
+  });
 
   return (
     <div className="min-h-screen bg-background scanline">
@@ -62,6 +78,7 @@ const Index = () => {
               onFsck={fs.runFsck}
               onQuarantineOrphans={fs.quarantineOrphans}
               onBenchmark={fs.runIOBenchmark}
+              onFactoryReset={fs.factoryReset}
               simulateCrashOnNextWrite={fs.simulateCrashOnNextWrite}
               onToggleSimulateCrashOnNextWrite={fs.setSimulateCrashOnNextWrite}
             />
@@ -77,17 +94,19 @@ const Index = () => {
               selectedFile={selectedFile}
             />
             <FsckPanel result={fs.lastFsckResult} />
+            <JournalLog journal={fs.journal} />
           </motion.div>
 
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.25 }}
-            className="rounded-xl border border-border bg-card p-4">
-            <CachePanel stats={fs.cacheStats} onSetSize={fs.setCacheSize} onClear={fs.clearCache} />
-          </motion.div>
-
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3, delay: 0.3 }}
-            className="rounded-xl border border-border bg-card p-4 space-y-4">
+            className="rounded-xl border border-border bg-card p-4 space-y-4 lg:col-span-2">
+            <CacheVisualizer
+              stats={fs.cacheStats}
+              onClearCache={fs.clearCache}
+              onSetCacheSize={fs.setCacheSize}
+              onSetCacheStrategy={fs.setCacheStrategy}
+              blockOwnerById={blockOwnerById}
+            />
             <BenchmarkPanel history={fs.benchmarkHistory} results={fs.benchmarkResults} />
-            <JournalLog journal={fs.journal} />
           </motion.div>
         </div>
       </main>
