@@ -53,14 +53,53 @@ export default function ControlPanel({
 
   const handleCreateFile = () => {
     if (!fileName.trim()) return;
-    const success = onCreateFile(fileName.trim(), fileSize, 'root', allocStrategy, freeStrategy);
-    if (success) { setFileName(''); setFileSize(4); }
+    const name = fileName.trim();
+    const success = onCreateFile(name, fileSize, 'root', allocStrategy, freeStrategy);
+    if (success) { 
+      toast({
+        title: `Created file: ${name}`,
+        description: `Size: ${fileSize}B, FAT: ${allocStrategy}, Free Space: ${freeStrategy}`,
+      });
+      setFileName(''); 
+      setFileSize(4); 
+    }
+  };
+
+  const handleCrash = () => {
+    onCrash(crashSeverity[0], crashType);
+    toast({
+      variant: 'destructive',
+      title: 'System Crash Simulated',
+      description: `Type: ${crashType}, Severity: ${(crashSeverity[0] * 100).toFixed(0)}%`,
+    });
   };
 
   const handleCreateDir = () => {
     if (!dirName.trim()) return;
-    onCreateDir(dirName.trim());
+    const name = dirName.trim();
+    onCreateDir(name);
+    toast({ title: 'Directory Created', description: `Created directory: ${name}` });
     setDirName('');
+  };
+
+  const handleRecover = () => {
+    onRecover();
+    toast({ title: 'Crash Recovery', description: 'Attempted to recover from system crash.' });
+  };
+
+  const handleReplayJournal = () => {
+    onReplayJournal();
+    toast({ title: 'Journal Replay', description: 'Replayed journal entries to recover incomplete writes.' });
+  };
+
+  const handleFsck = (autoRepair: boolean) => {
+    onFsck(autoRepair);
+    toast({ title: 'fsck (File System Check)', description: autoRepair ? 'Scanned and repaired inconsistencies.' : 'Scanned for inconsistencies.' });
+  };
+
+  const handleQuarantineOrphans = () => {
+    onQuarantineOrphans();
+    toast({ title: 'Quarantine Orphans', description: 'Moved orphaned inodes to /lost+found.' });
   };
 
   const handleFactoryReset = async () => {
@@ -187,7 +226,7 @@ export default function ControlPanel({
             size="sm"
             variant="destructive"
             className="flex-1 h-7 text-xs"
-            onClick={() => onCrash(crashSeverity[0], crashType)}
+            onClick={handleCrash}
             title="Inject simulated crash corruption"
           >
             <Skull className="w-3 h-3 mr-1" /> Crash
@@ -196,7 +235,7 @@ export default function ControlPanel({
             size="sm"
             variant="outline"
             className="flex-1 h-7 text-xs"
-            onClick={onRecover}
+            onClick={handleRecover}
             title="Recover from crash; may remove corrupted files/blocks"
           >
             <ShieldCheck className="w-3 h-3 mr-1" /> Recover Crash
@@ -206,7 +245,7 @@ export default function ControlPanel({
           size="sm"
           variant="outline"
           className="w-full h-7 text-xs"
-          onClick={onReplayJournal}
+          onClick={handleReplayJournal}
           title="Replay journal entries for incomplete writes (undo/redo path)"
         >
           <History className="w-3 h-3 mr-1" /> Replay Journal
@@ -221,7 +260,7 @@ export default function ControlPanel({
             size="sm"
             variant="outline"
             className="flex-1 h-7 text-xs"
-            onClick={() => onFsck(false)}
+            onClick={() => handleFsck(false)}
             title="Scan for file system consistency issues"
           >
             <Search className="w-3 h-3 mr-1" /> Scan
@@ -230,7 +269,7 @@ export default function ControlPanel({
             size="sm"
             variant="outline"
             className="flex-1 h-7 text-xs"
-            onClick={() => onFsck(true)}
+            onClick={() => handleFsck(true)}
             title="Repair FAT/FSM allocation bitmap mismatches only"
           >
             <Trash2 className="w-3 h-3 mr-1" /> Auto-Repair (fsck)
@@ -240,7 +279,7 @@ export default function ControlPanel({
           size="sm"
           variant="outline"
           className="w-full h-7 text-xs"
-          onClick={onQuarantineOrphans}
+          onClick={handleQuarantineOrphans}
           title="Move orphaned inode chains into /lost+found for manual inspection"
         >
           <Archive className="w-3 h-3 mr-1" /> Quarantine Orphans

@@ -1,5 +1,6 @@
 import { DiskBlock } from '@/lib/fileSystem';
 import { motion } from 'framer-motion';
+import { useState } from 'react';
 
 interface DiskMapProps {
   disk: DiskBlock[];
@@ -20,6 +21,8 @@ const stateColors: Record<string, string> = {
 };
 
 export default function DiskMap({ disk, highlightFile }: DiskMapProps) {
+  const [hoveredFileId, setHoveredFileId] = useState<string | null>(null);
+
   // Determine grid columns: 32 for 1024 blocks, 16 for smaller
   const cols = disk.length > 256 ? 32 : 16;
   const gridClass = cols === 32
@@ -44,10 +47,12 @@ export default function DiskMap({ disk, highlightFile }: DiskMapProps) {
       </div>
       <div className={`grid ${gridClass} gap-[1px] p-3 rounded-lg bg-background border border-border`}>
         {disk.map((block) => {
-          const isHighlighted = highlightFile && block.fileId === highlightFile;
+          const isHighlighted = (highlightFile && block.fileId === highlightFile) || (hoveredFileId && block.fileId === hoveredFileId);
           return (
             <motion.div
               key={block.id}
+              onMouseEnter={() => block.fileId ? setHoveredFileId(block.fileId) : null}
+              onMouseLeave={() => setHoveredFileId(null)}
               initial={{ scale: 0.8, opacity: 0 }}
               animate={{
                 scale: isHighlighted ? 1.3 : 1,

@@ -28,6 +28,14 @@ const Index = () => {
     }
   };
 
+  const handleDeleteFile = (fileId: string) => {
+    const file = fs.files.get(fileId);
+    if (file) {
+      toast({ title: 'File Deleted', description: `Deleted file: ${file.name}` });
+    }
+    fs.deleteFile(fileId);
+  };
+
   const blockOwnerById: Record<number, string> = {};
   fs.disk.forEach((block) => {
     if (block.fileId) {
@@ -90,7 +98,7 @@ const Index = () => {
               directories={fs.directories}
               files={fs.files}
               onSelectFile={handleSelectFile}
-              onDeleteFile={fs.deleteFile}
+              onDeleteFile={handleDeleteFile}
               selectedFile={selectedFile}
             />
             <FsckPanel result={fs.lastFsckResult} />

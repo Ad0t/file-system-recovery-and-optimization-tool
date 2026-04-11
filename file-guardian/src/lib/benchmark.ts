@@ -54,15 +54,22 @@ export function runBenchmark(
 }
 
 export function calculateBenchmarkHistory(results: BenchmarkResult[]): BenchmarkHistory {
-  const avgRead = results.length > 0
-    ? results.reduce((s, r) => s + r.readTime, 0) / results.length : 0;
-  const avgWrite = results.length > 0
-    ? results.reduce((s, r) => s + r.writeTime, 0) / results.length : 0;
+  let recentResults: BenchmarkResult[] = [];
+  if (results.length > 0) {
+    const newestTime = results[0].timestamp;
+    // Group all results that were generated in the same user action (e.g. the 3 strategies from clicking Bench)
+    recentResults = results.filter(r => Math.abs(newestTime - r.timestamp) < 50);
+  }
+
+  const avgRead = recentResults.length > 0
+    ? recentResults.reduce((s, r) => s + r.readTime, 0) / recentResults.length : 0;
+  const avgWrite = recentResults.length > 0
+    ? recentResults.reduce((s, r) => s + r.writeTime, 0) / recentResults.length : 0;
 
   return {
     results,
     avgReadTime: Math.round(avgRead * 100) / 100,
     avgWriteTime: Math.round(avgWrite * 100) / 100,
-    totalOps: results.length,
+    totalOps: results.length, // Total history count remains unchanged
   };
 }

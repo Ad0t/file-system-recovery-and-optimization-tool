@@ -179,8 +179,8 @@ export default function CacheVisualizer({
             </div>
             <Slider
               value={[cacheSizeSlider]}
-              min={10}
-              max={50}
+              min={8}
+              max={64}
               step={1}
               onValueChange={(value) => handleTargetSizeChange(value[0])}
             />
