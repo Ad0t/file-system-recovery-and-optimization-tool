@@ -1,6 +1,0 @@
-bitarray
-numpy
-pytest
-fastapi
-uvicorn
-websockets
